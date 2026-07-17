@@ -1,9 +1,14 @@
+"""
+导入 Agent 的 LangGraph 状态定义与工厂函数。
+ImportGraphState 为 TypedDict，贯穿整个导入流水线各节点。
+"""
 import copy
 from typing import TypedDict
 import json
 
 
 class ImportGraphState(TypedDict):
+    """导入流程状态：文件路径、Markdown 内容、切片结果、向量化上下文等。"""
     task_id: str
 
     local_file_path: str
@@ -40,15 +45,15 @@ graph_default_state: ImportGraphState = {
 }
 
 
-# 方法1:根据传入的参数创建一个对应的state
 def create_default_state(**args) -> ImportGraphState:
+    """深拷贝默认状态模板并用传入参数覆盖，返回新状态。"""
     deep_new_state = copy.deepcopy(graph_default_state)
     deep_new_state.update(args)
     return deep_new_state
 
 
-# 方法2:获取创建好的默认的空state
 def get_default_state() -> ImportGraphState:
+    """获取只读的默认状态模板。"""
     return graph_default_state
 
 

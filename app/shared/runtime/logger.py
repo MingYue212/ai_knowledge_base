@@ -62,7 +62,7 @@ def init_logger():
             level=LOG_CONSOLE_LEVEL,
             format=LOG_FORMAT,
             colorize=True,
-            enqueue=True
+            enqueue=False
         )
 
     # 3. 配置文件输出（若.env开启）
@@ -75,7 +75,7 @@ def init_logger():
             rotation="00:00",
             retention=LOG_FILE_RETENTION,
             encoding="utf-8",
-            enqueue=True,
+            enqueue=False,
             backtrace=True,
             diagnose=True
         )
