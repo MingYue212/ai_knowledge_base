@@ -8,4 +8,4 @@ class LLMProvider:
     def llm_model(self, llm_model_name, json_code):
         return get_llm_client(llm_model_name, json_code)
 
-llm_provider = LLMProvider
+llm_provider = LLMProvider()

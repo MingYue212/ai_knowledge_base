@@ -33,5 +33,5 @@ if __name__ == '__main__':
 
     result = node_pdf_to_md(test_state)
     logger.info(f"md_path:{result['md_path']}")
-    logger.info(f"md_context长度:{len(result['md_context'])}")
+    logger.info(f"md_content长度:{len(result['md_content'])}")
     logger.info("===== 结束 node_pdf_to_md 节点联调测试 =====")

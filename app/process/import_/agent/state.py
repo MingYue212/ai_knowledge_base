@@ -21,7 +21,7 @@ class ImportGraphState(TypedDict):
     is_md_read_enabled: bool
     is_pdf_read_enabled: bool
 
-    md_context: str
+    md_content: str
 
     chunks: list[dict]
     item_name: str
@@ -38,7 +38,7 @@ graph_default_state: ImportGraphState = {
     "pdf_path": "",
     "md_path": "",
     "file_title": "",
-    "md_context": "",
+    "md_content": "",
     "chunks": [],
     "item_name": "",
     "embedding_context": [],
