@@ -1,5 +1,6 @@
 """
-工具模块，负责提供 sse 相关的辅助能力。
+SSE（Server-Sent Events）推送工具。
+基于内存队列实现服务端向客户端实时推送 LangGraph 节点进度和 LLM 流式输出。
 """
 import json
 import queue

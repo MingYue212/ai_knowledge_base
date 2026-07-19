@@ -1,9 +1,13 @@
+"""
+Milvus 向量库配置，定义连接地址与集合名。
+"""
 from dataclasses import dataclass
 
 from app.shared.config.common import env_str
 
 @dataclass
 class MilvusConfig:
+    """Milvus 连接与集合配置。"""
     milvus_url: str
     chunks_collection: str
     entity_name_collection: str

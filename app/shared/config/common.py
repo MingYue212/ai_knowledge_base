@@ -1,3 +1,7 @@
+"""
+环境变量读取工具：提供类型安全的 env_str / env_bool / env_float 函数。
+模块加载时自动执行 load_dotenv()，后续 import 本模块的文件可直接使用 os.getenv。
+"""
 from __future__ import annotations
 
 import os

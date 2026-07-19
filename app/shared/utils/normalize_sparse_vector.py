@@ -1,5 +1,5 @@
 """
-应用主包 / 工具模块中的 normalize_sparse_vector 模块，负责承载对应场景的具体实现逻辑。
+稀疏向量 L2 归一化工具，配合 Milvus 稀疏向量检索使用。
 """
 import numpy as np
 def normalize_sparse_vector(sparse_vec):

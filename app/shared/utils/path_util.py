@@ -1,5 +1,5 @@
 """
-应用主包 / 工具模块中的 path_util 模块，负责承载对应场景的具体实现逻辑。
+路径工具：提供项目根目录推导与灵活的上 N 级目录获取。
 """
 # app/shared/utils/path_util.py
 from pathlib import Path

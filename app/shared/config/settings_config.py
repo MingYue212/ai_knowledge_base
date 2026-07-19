@@ -1,3 +1,7 @@
+"""
+应用级配置：服务名、端口、CORS 等。
+依赖 common.py 完成 .env 加载与环境变量读取。
+"""
 import os
 from dataclasses import dataclass
 
@@ -8,6 +12,7 @@ from dataclasses import dataclass
 
 @dataclass
 class AppSettings:
+    """FastAPI 微服务运行参数。"""
     import_app_name: str = os.getenv("IMPORT_APP_NAME", "Enterprise RAG Import Service")
     query_app_name: str = os.getenv("QUERY_APP_NAME", "Enterprise RAG Query Service")
     app_env: str = os.getenv("APP_ENV", "dev")
