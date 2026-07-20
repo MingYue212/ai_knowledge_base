@@ -214,7 +214,7 @@ def download_and_extract_markdown(zip_download_url: str, local_dir_obj: Path, st
             break
     if full_md_file_obj is None:
         raise RuntimeError("解压后的文件中既未找到同名 .md 也未找到 full.md")
-    full_md_file_obj.rename(full_md_file_obj.with_stem(f"{stem}.md"))
+    full_md_file_obj.rename(full_md_file_obj.with_name(f"{stem}.md"))
     return full_md_file_obj
 
 

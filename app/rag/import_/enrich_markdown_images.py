@@ -157,7 +157,28 @@ def upload_images_get_url(image_info_list: list[tuple[str, str, tuple[str, str]]
         except Exception as e:
             logger.warning(f"{image_name}上传失败,跳过,继续下一张图片传递!!")
             # 3.记录图片和对应的访问地址即可
-        return image_url_dict
+    return image_url_dict
+
+
+def md_content_image_replace(md_content: str, summary_image_dict: dict[str, str],
+                             image_url_dict: dict[str, str]) -> str:
+    # 1.遍历summary_image_dict。因为必须有图片的描述
+    for img_name, img_summary in summary_image_dict.items():
+        # 2.获取图片name和URL
+        img_url = image_url_dict.get(img_name)
+        # 3.定义正则找到图片位置并替换
+        img_reg = re.compile(r"\!\[.*?\]\(.*?" + re.escape(img_name) + r".*?\)")
+        # 4.用正则替换
+        md_content = img_reg.sub(lambda _: f"[{img_summary}]({img_url})", md_content)
+    return md_content
+
+
+def backup_new_md_content(md_content_new, md_path_obj):
+    # 1.创建路径，用来保存md_content_new
+    md_path_obj_new: Path = md_path_obj.with_name(f"{md_path_obj}_new.md")
+    # 2.写入保存路径
+    md_path_obj_new.write_text(md_content_new, encoding="utf-8")
+    return md_path_obj_new
 
 
 def enrich_markdown_images(state: ImportGraphState) -> ImportGraphState:
@@ -176,5 +197,8 @@ def enrich_markdown_images(state: ImportGraphState) -> ImportGraphState:
     # 5. 将图片信息传递到minio的服务器,并获取图片和对应的网络地址
     # {image_name:http...}
     image_url_dict: dict[str, str] = upload_images_get_url(image_info_list, md_path_obj.stem)
-    print(image_url_dict)
+    # 6.替换content里的描述和url
+    md_content_new: str = md_content_image_replace(md_content, summary_image_dict, image_url_dict)
+    # 7.保留md_content，另存md_content_new
+    md_path_obj_new: Path = backup_new_md_content(md_content_new, md_path_obj)
     return state
