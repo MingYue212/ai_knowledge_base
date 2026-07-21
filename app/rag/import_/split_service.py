@@ -36,7 +36,7 @@ def split_document_by_title(md_content, file_title):
     chunks: list[dict[str, Any]] = []
     current_title: str | None = None
     current_title_lines: list[str] = []
-    is_code: bool
+    is_code: bool = False
 
     # 2.按行切割
     doc_lines: list[str] = md_content.split("\n")

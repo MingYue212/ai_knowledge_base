@@ -63,13 +63,15 @@ def upload_pdf_and_poll(pdf_path_obj: Path) -> str:
             {"name": f"{pdf_path_obj.name}", "data_id": f"{pdf_path_obj.stem}"}
         ],
         "model_version": MINERU_MODEL_VERSION,
-    }
-    response = requests.post(
-        url=url,
-        headers=header,
-        json=data,
-        timeout=MINERU_DOWNLOAD_TIMEOUT_SECONDS
-    )
+   }
+    with requests.Session() as session:
+        session.trust_env = False
+        response = session.post(
+            url=url,
+            headers=header,
+            json=data,
+            timeout=MINERU_DOWNLOAD_TIMEOUT_SECONDS
+        )
 
     status_code = response.status_code
     if status_code != 200:

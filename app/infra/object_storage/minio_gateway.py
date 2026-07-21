@@ -47,3 +47,6 @@ class MinIOGateway:
             f"{file_name}/"
             f"{object_name}"
         )
+
+
+minio_gateway = MinIOGateway()

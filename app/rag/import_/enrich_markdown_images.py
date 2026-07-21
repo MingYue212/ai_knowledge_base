@@ -9,7 +9,7 @@ from minio.deleteobjects import DeleteObject
 
 from app.infra.config.providers import infra_config
 from app.infra.llm.providers import llm_provider
-from app.infra.object_storage import minio_gateway
+from app.infra.object_storage.minio_gateway import minio_gateway
 from app.process.import_.agent.state import ImportGraphState
 from app.rag.import_.config import SUPPORTED_IMAGE_EXTENSIONS, IMAGE_CONTEXT_SUB_CHARS
 from app.shared.runtime.load_prompt import load_prompt
@@ -175,7 +175,7 @@ def md_content_image_replace(md_content: str, summary_image_dict: dict[str, str]
 
 def backup_new_md_content(md_content_new, md_path_obj):
     # 1.创建路径，用来保存md_content_new
-    md_path_obj_new: Path = md_path_obj.with_name(f"{md_path_obj}_new.md")
+    md_path_obj_new: Path = md_path_obj.with_name(f"{md_path_obj.stem}_new.md")
     # 2.写入保存路径
     md_path_obj_new.write_text(md_content_new, encoding="utf-8")
     return md_path_obj_new
