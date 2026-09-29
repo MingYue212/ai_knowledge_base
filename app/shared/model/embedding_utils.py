@@ -118,3 +118,48 @@ def generate_embeddings(texts: list[str]) -> dict[str, list]:
         raise  # 不吞异常，向上传递让调用方做重试/降级处理
 
 
+
+
+def generate_query_embeddings(texts: list[str]) -> dict[str, list]:
+    """
+    为查询文本生成稠密+稀疏混合向量嵌入（查询侧）。
+
+    与 generate_embeddings（文档侧 encode_documents）的区别：
+    查询侧使用 encode_queries 编码。BGE-M3 对查询/文档两侧分别提供
+    编码接口，pymilvus 推荐两侧各自调用（也为后续换检索模型留出空间）；
+    返回格式与 generate_embeddings 完全一致，便于检索侧直接复用。
+    """
+    # 入参合法性校验
+    if not isinstance(texts, list) or len(texts) == 0:
+        logger.warning("生成查询向量入参不合法，texts必须为非空列表")
+        raise ValueError("参数texts必须是包含文本的非空列表")
+
+    logger.info(f"开始为{len(texts)}条查询文本生成混合向量嵌入")
+    try:
+        # 加载BGE-M3模型单例（与文档侧共用，避免重复加载模型）
+        model = get_bge_m3_ef()
+        # 查询侧编码：encode_queries（区别于文档侧的 encode_documents）
+        embeddings = model.encode_queries(texts)
+        logger.debug(f"查询编码完成，开始解析稀疏向量格式，共{len(texts)}条")
+
+        # 解析稀疏向量：CSR稀疏矩阵 → [{维度索引: 权重}] 字典列表（与文档侧同构）
+        sparse_matrix = embeddings["sparse"]
+        processed_sparse = []
+        for i in range(len(texts)):
+            # 提取第i条查询的稀疏向量索引与权重：np.int64/np.float32 → Python类型
+            sparse_indices = sparse_matrix.indices[
+                sparse_matrix.indptr[i]:sparse_matrix.indptr[i + 1]
+            ].tolist()
+            sparse_data = sparse_matrix.data[
+                sparse_matrix.indptr[i]:sparse_matrix.indptr[i + 1]
+            ].tolist()
+            processed_sparse.append({k: v for k, v in zip(sparse_indices, sparse_data)})
+
+        # 构造最终返回结果，稠密向量转列表（解决numpy数组不可序列化问题）
+        return {
+            "dense": [emb.tolist() for emb in embeddings["dense"]],
+            "sparse": processed_sparse
+        }
+    except Exception as e:
+        logger.error(f"查询向量生成失败：{str(e)}", exc_info=True)
+        raise  # 不吞异常，向上传递让调用方做重试/降级处理

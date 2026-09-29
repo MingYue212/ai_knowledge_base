@@ -25,4 +25,3 @@ class AppSettings:
 
 
 settings = AppSettings()
-print(settings)
