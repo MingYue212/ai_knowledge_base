@@ -192,6 +192,32 @@
   .history-list .ok { color: var(--good); } .history-list .fail { color: var(--bad); }
   .empty-hint { color: var(--text-dim); font-size: 12.5px; text-align: center; padding: 10px; }
 
+  /* ---------- 切片管理 ---------- */
+  .chunk-toolbar { display: flex; gap: 9px; margin-top: 14px; align-items: center; flex-wrap: wrap; }
+  .chunk-select {
+    flex: 1; min-width: 220px; background: var(--card); border: 1px solid var(--border); color: var(--text);
+    border-radius: 9px; padding: 8px 11px; font-size: 13.5px; outline: none;
+  }
+  .chunk-select:focus { border-color: var(--accent); }
+  .chunk-count { font-size: 12.5px; color: var(--text-dim); margin: 12px 2px 8px; }
+  .chunk-card { padding: 13px 15px; margin-bottom: 10px; }
+  .chunk-text { margin-top: 9px; font-size: 13.5px; line-height: 1.7; color: var(--text); white-space: pre-wrap; word-break: break-word; }
+  .chunk-actions { display: flex; gap: 7px; flex: none; }
+  .chunk-card textarea, .chunk-card input, #add-chunk-text, .add-grid input {
+    width: 100%; background: var(--card-soft); border: 1px solid var(--border); color: var(--text);
+    border-radius: 9px; padding: 8px 10px; font-size: 13.5px; font-family: var(--font); outline: none; resize: vertical;
+  }
+  .chunk-card textarea:focus, .chunk-card input:focus, #add-chunk-text:focus, .add-grid input:focus { border-color: var(--accent); }
+  .chunk-edit { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+  .chunk-edit .row { display: flex; gap: 8px; }
+  .chunk-edit .row input { flex: 1; }
+  .chunk-edit .row input.num { flex: 0 0 90px; }
+  .chunk-edit .actions { display: flex; gap: 8px; }
+  .add-grid { display: flex; gap: 9px; flex-wrap: wrap; margin-bottom: 9px; }
+  .add-grid label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--text-dim); flex: 1; min-width: 160px; }
+  .chunk-pager { display: flex; gap: 12px; align-items: center; justify-content: center; margin-top: 6px; }
+  .chunk-pager button:disabled { opacity: .4; cursor: not-allowed; }
+
   /* ---------- 设置抽屉 ---------- */
   #drawer-mask { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 40; display: none; }
   #drawer-mask.show { display: block; }
@@ -246,6 +272,7 @@
   <nav class="tabs">
     <button class="tab active" data-tab="chat">💬 智能问答</button>
     <button class="tab" data-tab="import">📤 文档导入</button>
+    <button class="tab" data-tab="chunks">🧩 切片管理</button>
   </nav>
 
   <!-- ============ 问答面板 ============ -->
@@ -279,6 +306,34 @@
         <button class="mini-btn" id="clear-history">清空记录</button>
       </div>
       <ul class="history-list" id="history-list"></ul>
+    </div>
+  </section>
+
+  <!-- ============ 切片管理面板 ============ -->
+  <section id="panel-chunks" class="panel">
+    <div class="chunk-toolbar">
+      <select id="chunk-doc-select" class="chunk-select"><option value="">选择文档…</option></select>
+      <button class="ghost-btn" id="chunk-refresh">🔄 刷新文档</button>
+      <button class="primary-btn" id="chunk-add-toggle">➕ 新增切片</button>
+    </div>
+    <div id="chunk-add-form" class="import-card" hidden style="margin-top:12px">
+      <div class="add-grid">
+        <label>文档标题<input id="add-file-title" placeholder="所属文档标题"></label>
+        <label>父级标题<input id="add-parent-title" placeholder="章节 / 父级标题"></label>
+        <label>序号<input id="add-part" type="number" min="1" value="1"></label>
+      </div>
+      <textarea id="add-chunk-text" rows="4" placeholder="切片正文（保存后自动向量化入库）…"></textarea>
+      <div class="import-done-actions">
+        <button class="primary-btn" id="add-submit">保存新增</button>
+        <button class="ghost-btn" id="add-cancel">取消</button>
+      </div>
+    </div>
+    <div id="chunk-count" class="chunk-count"></div>
+    <div id="chunk-list"></div>
+    <div class="chunk-pager">
+      <button class="ghost-btn" id="chunk-prev">上一页</button>
+      <span id="chunk-page-info" class="h-meta"></span>
+      <button class="ghost-btn" id="chunk-next">下一页</button>
     </div>
   </section>
 </div>
@@ -751,6 +806,175 @@ dz.addEventListener('drop', (e) => {
   const file = e.dataTransfer.files[0];
   if (file) startImport(file);
 });
+
+/* ================= 切片管理 ================= */
+const chunkState = { doc: '', page: 1, pageSize: 20, total: 0 };
+const chunkCache = {};
+
+async function loadChunkDocs(force = false) {
+  const sel = $('chunk-doc-select');
+  if (!force && sel.dataset.loaded === '1') return;
+  sel.innerHTML = '<option value="">加载文档中…</option>';
+  try {
+    const resp = await fetch(`${S.importBase}/chunks/documents`);
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    sel.innerHTML = '<option value="">选择文档…</option>' +
+      (data.documents || []).map((d) =>
+        `<option value="${escapeHtml(d.file_title)}">${escapeHtml(d.file_title)}（${d.chunk_count}片）</option>`).join('');
+    sel.dataset.loaded = '1';
+  } catch (e) {
+    sel.innerHTML = '<option value="">加载失败,点刷新重试</option>';
+    toast('文档列表加载失败:' + e.message, 'error');
+  }
+}
+
+async function loadChunks() {
+  if (!chunkState.doc) {
+    $('chunk-list').innerHTML = '<div class="empty-hint">请先在上方选择文档</div>';
+    $('chunk-count').textContent = '';
+    $('chunk-page-info').textContent = '';
+    return;
+  }
+  $('chunk-list').innerHTML = '<div class="empty-hint">加载中…</div>';
+  try {
+    const qs = `file_title=${encodeURIComponent(chunkState.doc)}&page=${chunkState.page}&page_size=${chunkState.pageSize}`;
+    const resp = await fetch(`${S.importBase}/chunks?${qs}`);
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    chunkState.total = data.total;
+    (data.items || []).forEach((it) => { chunkCache[it.id] = it; });
+    $('chunk-count').textContent = `「${chunkState.doc}」共 ${data.total} 个切片`;
+    const pages = Math.max(1, Math.ceil(data.total / chunkState.pageSize));
+    $('chunk-page-info').textContent = `第 ${chunkState.page} / ${pages} 页`;
+    $('chunk-prev').disabled = chunkState.page <= 1;
+    $('chunk-next').disabled = chunkState.page >= pages;
+    $('chunk-list').innerHTML = (data.items || []).map(renderChunkCard).join('') ||
+      '<div class="empty-hint">该文档暂无切片,可在上方点击「新增切片」补充</div>';
+  } catch (e) {
+    $('chunk-list').innerHTML = `<div class="empty-hint">加载失败:${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function renderChunkCard(c) {
+  const full = String(c.chunk_text || '');
+  const preview = escapeHtml(full.slice(0, 160));
+  return `<div class="import-card chunk-card" data-id="${c.id}">
+    <div class="import-head">
+      <span class="meta-chip">id: ${c.id}</span>
+      <span class="meta-chip">🧩 ${escapeHtml(c.parent_title || '')} · 第${c.part}片</span>
+      <span class="chunk-actions">
+        <button class="mini-btn" data-act="edit">编辑</button>
+        <button class="mini-btn" data-act="del">删除</button>
+      </span>
+    </div>
+    <div class="chunk-text">${preview}${full.length > 160 ? '…' : ''}</div>
+    <div class="chunk-edit" hidden>
+      <textarea class="edit-text" rows="5"></textarea>
+      <div class="row">
+        <input class="edit-parent" placeholder="父级标题">
+        <input class="edit-part num" type="number" min="1" placeholder="序号">
+      </div>
+      <div class="actions">
+        <button class="primary-btn" data-act="save">保存（重新向量化）</button>
+        <button class="ghost-btn" data-act="cancel">取消</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+$('chunk-doc-select').addEventListener('change', function () {
+  chunkState.doc = this.value;
+  chunkState.page = 1;
+  loadChunks();
+});
+$('chunk-refresh').addEventListener('click', () => { loadChunkDocs(true); toast('文档列表已刷新', 'success'); });
+$('chunk-prev').addEventListener('click', () => { if (chunkState.page > 1) { chunkState.page--; loadChunks(); } });
+$('chunk-next').addEventListener('click', () => {
+  if (chunkState.page < Math.max(1, Math.ceil(chunkState.total / chunkState.pageSize))) { chunkState.page++; loadChunks(); }
+});
+
+$('chunk-add-toggle').addEventListener('click', () => {
+  const form = $('chunk-add-form');
+  form.hidden = !form.hidden;
+  if (!form.hidden) {
+    $('add-file-title').value = chunkState.doc || '';
+    $('add-chunk-text').focus();
+  }
+});
+$('add-cancel').addEventListener('click', () => { $('chunk-add-form').hidden = true; });
+$('add-submit').addEventListener('click', async () => {
+  const payload = {
+    file_title: $('add-file-title').value.trim(),
+    parent_title: $('add-parent-title').value.trim(),
+    part: parseInt($('add-part').value, 10) || 1,
+    chunk_text: $('add-chunk-text').value,
+  };
+  if (!payload.file_title || !payload.chunk_text.trim()) { toast('文档标题与正文不能为空', 'error'); return; }
+  try {
+    const resp = await fetch(`${S.importBase}/chunks`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    toast(`切片已新增(id:${data.new_id ?? '待回查'})`, 'success');
+    $('chunk-add-form').hidden = true;
+    $('add-chunk-text').value = '';
+    chunkState.doc = payload.file_title;
+    chunkState.page = 1;
+    await loadChunkDocs(true);
+    $('chunk-doc-select').value = payload.file_title;
+    loadChunks();
+  } catch (e) { toast('新增失败:' + e.message, 'error'); }
+});
+
+$('chunk-list').addEventListener('click', async (e) => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  const card = btn.closest('.chunk-card');
+  const id = card ? Number(card.dataset.id) : NaN;
+  const act = btn.dataset.act;
+
+  if (act === 'edit') {
+    const info = chunkCache[id];
+    if (!info) { toast('切片数据已过期,请刷新列表', 'error'); return; }
+    card.querySelector('.edit-text').value = info.chunk_text;
+    card.querySelector('.edit-parent').value = info.parent_title || '';
+    card.querySelector('.edit-part').value = info.part || 1;
+    card.querySelector('.chunk-edit').hidden = false;
+  } else if (act === 'cancel') {
+    card.querySelector('.chunk-edit').hidden = true;
+  } else if (act === 'save') {
+    const payload = {
+      chunk_text: card.querySelector('.edit-text').value,
+      parent_title: card.querySelector('.edit-parent').value,
+      part: parseInt(card.querySelector('.edit-part').value, 10) || 1,
+    };
+    if (!payload.chunk_text.trim()) { toast('正文不能为空', 'error'); return; }
+    btn.disabled = true;
+    try {
+      const resp = await fetch(`${S.importBase}/chunks/${id}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+      toast(`已保存(新id:${data.new_id ?? '待回查'}),向量已重新生成`, 'success');
+      loadChunks();
+    } catch (err) { toast('保存失败:' + err.message, 'error'); btn.disabled = false; }
+  } else if (act === 'del') {
+    if (!confirm(`确认删除切片 ${id}？该操作会同步删除向量库记录,不可恢复`)) return;
+    try {
+      const resp = await fetch(`${S.importBase}/chunks/${id}`, { method: 'DELETE' });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+      toast('切片已删除', 'success');
+      loadChunks();
+      loadChunkDocs(true);
+    } catch (err) { toast('删除失败:' + err.message, 'error'); }
+  }
+});
+
+document.querySelector('.tab[data-tab="chunks"]').addEventListener('click', () => { loadChunkDocs(); });
 
 /* ================= 测试按钮 / 初始化 ================= */
 $('test-import').addEventListener('click', async () => {

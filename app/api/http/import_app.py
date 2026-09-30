@@ -16,13 +16,29 @@ import threading
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 
-from app.api.schemas.import_schemas import ImportResponse, ProgressResponse
+from app.api.schemas.import_schemas import (
+    ChunkCreateRequest,
+    ChunkDocumentListResponse,
+    ChunkListResponse,
+    ChunkMutationResponse,
+    ChunkUpdateRequest,
+    ImportResponse,
+    ProgressResponse,
+)
 from app.process.import_.agent.main_graph import import_app
 from app.process.import_.agent.state import create_default_state
+from app.rag.import_.chunk_manage_service import (
+    ChunkNotFoundError,
+    add_chunk,
+    delete_chunk,
+    list_chunk_documents,
+    list_chunks,
+    update_chunk,
+)
 from app.shared.config.settings_config import settings
 from app.shared.runtime.logger import logger
 from app.shared.utils.path_util import PROJECT_ROOT
@@ -124,6 +140,71 @@ def import_progress(task_id: str) -> ProgressResponse:
 def import_progress_stream(task_id: str, request: Request) -> StreamingResponse:
     """SSE 实时进度流：逐节点推送 progress 事件，结束推 final/error 后自动关闭。"""
     return StreamingResponse(sse_generator(task_id, request), media_type="text/event-stream")
+
+
+# ---------------- 切片管理（手动管理已入库 chunk） ----------------
+
+def _map_chunk_error(e: Exception) -> HTTPException:
+    """服务层业务异常 → HTTP 语义：切片不存在 404，其余入参问题 400。"""
+    if isinstance(e, ChunkNotFoundError):
+        return HTTPException(status_code=404, detail=str(e))
+    return HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/chunks/documents", response_model=ChunkDocumentListResponse)
+def chunk_documents() -> ChunkDocumentListResponse:
+    """列出所有已入库文档及各自的切片数量。"""
+    try:
+        docs = list_chunk_documents()
+    except Exception as e:
+        raise _map_chunk_error(e) from e
+    return ChunkDocumentListResponse(documents=docs)
+
+
+@app.get("/chunks", response_model=ChunkListResponse)
+def chunk_list(
+    file_title: str = Query(..., min_length=1),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+) -> ChunkListResponse:
+    """按文档标题分页列出切片（按父标题/序号稳定排序）。"""
+    try:
+        result = list_chunks(file_title=file_title, page=page, page_size=page_size)
+    except Exception as e:
+        raise _map_chunk_error(e) from e
+    return ChunkListResponse(**result)
+
+
+@app.post("/chunks", response_model=ChunkMutationResponse)
+def chunk_create(request: ChunkCreateRequest) -> ChunkMutationResponse:
+    """手动新增切片：校验 + 自动向量化 + 入库。"""
+    try:
+        result = add_chunk(request.file_title, request.parent_title, request.part, request.chunk_text)
+    except Exception as e:
+        raise _map_chunk_error(e) from e
+    return ChunkMutationResponse(new_id=result.get("id"), chunk=result)
+
+
+@app.patch("/chunks/{chunk_id}", response_model=ChunkMutationResponse)
+def chunk_update(chunk_id: int, request: ChunkUpdateRequest) -> ChunkMutationResponse:
+    """编辑切片正文/标题：重嵌 → 删旧插新（id 会变化）。"""
+    try:
+        result = update_chunk(chunk_id, request.chunk_text, request.parent_title, request.part)
+    except Exception as e:
+        raise _map_chunk_error(e) from e
+    return ChunkMutationResponse(
+        old_id=result.get("old_id"), new_id=result.get("new_id"), chunk=result["chunk"]
+    )
+
+
+@app.delete("/chunks/{chunk_id}")
+def chunk_delete(chunk_id: int) -> dict:
+    """删除单个切片。"""
+    try:
+        delete_chunk(chunk_id)
+    except Exception as e:
+        raise _map_chunk_error(e) from e
+    return {"ok": True, "id": chunk_id}
 
 
 # 前端控制台（单页应用，两服务共用同一页面，/docs 仍可用作接口调试）

@@ -166,6 +166,79 @@ class MilvusGateway:
             output_fields=["id", "chunk_text", "file_title", "parent_title", "part"],
         )
 
+    # ---------- 切片管理（chunk 手动管理，业务入口见 rag/import_/chunk_manage_service） ----------
+
+    _CHUNK_OUTPUT_FIELDS = ["id", "chunk_text", "file_title", "parent_title", "part"]
+
+    def query_chunks(self, filter_expr: str, limit: int, offset: int = 0) -> list[dict]:
+        """
+        按过滤表达式查询文档切块（管理用途，不走向量检索）。
+
+        Args:
+            filter_expr: Milvus 过滤表达式；空串按全部处理（id >= 0）。
+            limit: 返回条数上限。
+            offset: 跳过条数（配合 limit 做分页）。
+
+        Returns:
+            list[dict]: 切片业务字段列表（含 id）。
+        """
+        expr = filter_expr.strip() or "id >= 0"
+        rows = self.client.query(
+            collection_name=self.chunks_collection,
+            filter=expr,
+            output_fields=self._CHUNK_OUTPUT_FIELDS,
+            limit=limit,
+            offset=offset,
+        )
+        logger.info(f"chunks集合条件查询完成,filter:{expr[:80]},返回{len(rows)}条")
+        return [dict(row) for row in rows]
+
+    def get_chunk(self, chunk_id: int) -> dict | None:
+        """
+        按主键取单个切片（含全部业务字段）。
+
+        Args:
+            chunk_id: Milvus 主键 id。
+
+        Returns:
+            dict | None: 切片实体；不存在时返回 None。
+        """
+        rows = self.client.get(
+            collection_name=self.chunks_collection,
+            ids=[chunk_id],
+            output_fields=self._CHUNK_OUTPUT_FIELDS,
+        )
+        return dict(rows[0]) if rows else None
+
+    def delete_chunks(self, chunk_ids: list[int]) -> None:
+        """
+        按主键批量删除切片。
+
+        Args:
+            chunk_ids: 待删除的 Milvus 主键 id 列表。
+        """
+        if not chunk_ids:
+            logger.warning("delete_chunks的入参chunk_ids为空,跳过删除!")
+            return
+        result = self.client.delete(collection_name=self.chunks_collection, ids=chunk_ids)
+        logger.info(f"chunks集合删除完成,ids:{chunk_ids},milvus返回:{result}")
+
+    def insert_chunk(self, entity: dict) -> int | None:
+        """
+        插入单条切片实体，返回新生成的主键 id（auto_id 集合由 Milvus 生成）。
+
+        Args:
+            entity: 入库实体，字段与 chunks 集合 schema 一一对应（不含 id）。
+
+        Returns:
+            int | None: 新主键 id；Milvus 返回中取不到 ids 时为 None（调用方按需回查）。
+        """
+        result = self.client.insert(collection_name=self.chunks_collection, data=[entity])
+        ids = result.get("ids") if isinstance(result, dict) else getattr(result, "ids", None)
+        new_id = int(ids[0]) if ids else None
+        logger.info(f"chunks集合单条插入完成,new_id:{new_id},milvus返回:{result}")
+        return new_id
+
 
 # 模块级单例，业务代码统一入口
 milvus_gateway = MilvusGateway()
