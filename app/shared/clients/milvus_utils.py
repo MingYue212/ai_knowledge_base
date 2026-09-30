@@ -42,7 +42,20 @@ def get_milvus_client() -> MilvusClient:
     return _milvus_client
 
 
-def create_hybrid_search_requests(query_embedding: dict, limit: int) -> list[AnnSearchRequest]:
+def build_group_filter_expr(allowed_group_ids: list[int]) -> str | None:
+    """
+    把可见知识组 id 列表组装成 Milvus 标量过滤表达式（权限过滤）。
+
+    :param allowed_group_ids: 当前用户可见的知识组 id 列表
+    :return: 形如 "group_id in [1, 2]" 的表达式；空列表返回 None（不过滤）
+    """
+    ids = sorted({int(g) for g in (allowed_group_ids or [])})
+    if not ids:
+        return None
+    return "group_id in [" + ", ".join(str(i) for i in ids) + "]"
+
+
+def create_hybrid_search_requests(query_embedding: dict, limit: int, expr: str | None = None) -> list[AnnSearchRequest]:
     """
     把单条查询的混合向量组装成稠密+稀疏两路检索请求（AnnSearchRequest）。
 
@@ -52,6 +65,8 @@ def create_hybrid_search_requests(query_embedding: dict, limit: int) -> list[Ann
 
     :param query_embedding: 单条查询的混合向量 {"dense": [float], "sparse": {维度: 权重}}
     :param limit: 每路召回数量（两阶段检索的召回段，宁可多不可漏）
+    :param expr: 标量过滤表达式（如知识组权限过滤 "group_id in [1, 2]"），
+                 在 Milvus 检索时下推执行；None 表示不过滤
     :return: 稠密+稀疏两路的 AnnSearchRequest 列表
     """
     # 稠密路：HNSW 检索，ef 为搜索时候选队列长度（越大越准越慢）
@@ -60,6 +75,7 @@ def create_hybrid_search_requests(query_embedding: dict, limit: int) -> list[Ann
         anns_field="dense_vector",
         param={"metric_type": "IP", "params": {"ef": 128}},
         limit=limit,
+        expr=expr,
     )
     # 稀疏路：倒排检索，无需额外搜索参数
     sparse_request = AnnSearchRequest(
@@ -67,6 +83,7 @@ def create_hybrid_search_requests(query_embedding: dict, limit: int) -> list[Ann
         anns_field="sparse_vector",
         param={"metric_type": "IP"},
         limit=limit,
+        expr=expr,
     )
     return [dense_request, sparse_request]
 
@@ -110,6 +127,7 @@ def hybrid_search(
             "file_title": hit.get("file_title", ""),
             "parent_title": hit.get("parent_title", ""),
             "part": hit.get("part", 1),
+            "group_id": hit.get("group_id"),
             "distance": hit.get("distance"),
         }
         for hit in hits

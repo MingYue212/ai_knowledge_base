@@ -11,6 +11,7 @@
 - 过滤表达式用 escape_milvus_string 转义文档标题，防注入/解析错误
 - item_name 主体索引不受本服务影响（编辑/删除切片不动主体名向量）
 """
+from app.infra.persistence.sqlite_gateway import sqlite_gateway
 from app.infra.vectorstore.milvus_gateway import milvus_gateway
 from app.shared.model.embedding_utils import generate_embeddings
 from app.shared.runtime.logger import logger, step_log
@@ -27,8 +28,12 @@ class ChunkNotFoundError(ValueError):
     """按 id 找不到切片（API 层转 404）。"""
 
 
-def _build_entity(file_title: str, parent_title: str, part: int | None, chunk_text: str) -> dict:
-    """校验入参（对齐 schema 上限）并生成含双向量的入库实体；校验失败抛 ValueError。"""
+def _build_entity(file_title: str, parent_title: str, part: int | None, chunk_text: str,
+                  group_id: int | None) -> dict:
+    """校验入参（对齐 schema 上限）并生成含双向量的入库实体；校验失败抛 ValueError。
+
+    group_id 为 None 时归入默认知识组（存量数据/未指定场景），保证新实体始终带组归属。
+    """
     file_title = (file_title or "").strip()
     parent_title = (parent_title or "").strip()
     chunk_text = (chunk_text or "").strip()
@@ -49,6 +54,7 @@ def _build_entity(file_title: str, parent_title: str, part: int | None, chunk_te
         "part": int(part or 1),
         "sparse_vector": embeddings["sparse"][0],
         "dense_vector": embeddings["dense"][0],
+        "group_id": int(group_id) if group_id else sqlite_gateway.get_default_group_id(),
     }
 
 
@@ -112,7 +118,9 @@ def update_chunk(
 
     new_parent = (parent_title if parent_title is not None else str(old.get("parent_title") or "")).strip()
     new_part = int(part) if part is not None else int(old.get("part") or 1)
-    entity = _build_entity(str(old.get("file_title") or ""), new_parent, new_part, chunk_text)
+    # 知识组归属沿用旧值（旧数据 group_id 为 None 时 _build_entity 内回退默认组），编辑不改组
+    entity = _build_entity(str(old.get("file_title") or ""), new_parent, new_part, chunk_text,
+                           old.get("group_id"))
 
     new_id = milvus_gateway.insert_chunk(entity)
     try:
@@ -134,11 +142,12 @@ def delete_chunk(chunk_id: int) -> None:
 
 
 @step_log("add_chunk")
-def add_chunk(file_title: str, parent_title: str, part: int | None, chunk_text: str) -> dict:
-    """手动新增切片：校验 + 重嵌 + 插入，返回带新 id 的切片实体。"""
-    entity = _build_entity(file_title, parent_title, part, chunk_text)
+def add_chunk(file_title: str, parent_title: str, part: int | None, chunk_text: str,
+              group_id: int | None = None) -> dict:
+    """手动新增切片：校验 + 重嵌 + 插入，返回带新 id 的切片实体。group_id 缺省归默认知识组。"""
+    entity = _build_entity(file_title, parent_title, part, chunk_text, group_id)
     new_id = milvus_gateway.insert_chunk(entity)
-    logger.info(f"切片新增完成,new_id:{new_id},文档:{entity['file_title']}")
+    logger.info(f"切片新增完成,new_id:{new_id},文档:{entity['file_title']},知识组:{entity['group_id']}")
     return {"id": new_id, **entity}
 
 
@@ -173,18 +182,27 @@ if __name__ == '__main__':
         "sparse": [{1: 0.5} for _ in texts],
     }
 
-    # 新增 → 列表
+    class _FakeMeta:
+        def get_default_group_id(self):
+            return 7
+
+    svc.sqlite_gateway = _FakeMeta()
+
+    # 新增 → 列表（缺省归默认组 7）
     added = svc.add_chunk("烫金机手册", "使用步骤", 2, "烫金机使用前请预热5分钟。")
     assert added["id"] == 100 and added["file_title"] == "烫金机手册"
+    assert added["group_id"] == 7, added
     docs = svc.list_chunk_documents()
     assert docs == [{"file_title": "烫金机手册", "chunk_count": 1}], docs
     listed = svc.list_chunks("烫金机手册")
     assert listed["total"] == 1 and listed["items"][0]["chunk_text"].startswith("烫金机")
 
-    # 编辑 → 删旧插新（id 变化），parent_title/part 未传时沿用旧值
+    # 编辑 → 删旧插新（id 变化），parent_title/part/知识组未传时沿用旧值
+    svc.milvus_gateway.rows[100]["group_id"] = 7
     updated = svc.update_chunk(100, "预热后再放入物料，温度200度。")
     assert updated["old_id"] == 100 and updated["new_id"] == 101
     assert updated["chunk"]["parent_title"] == "使用步骤" and updated["chunk"]["part"] == 2
+    assert updated["chunk"]["group_id"] == 7, updated
     assert svc.milvus_gateway.get_chunk(100) is None
 
     # 不存在 → ChunkNotFoundError

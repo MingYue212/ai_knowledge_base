@@ -218,6 +218,31 @@
   .chunk-pager { display: flex; gap: 12px; align-items: center; justify-content: center; margin-top: 6px; }
   .chunk-pager button:disabled { opacity: .4; cursor: not-allowed; }
 
+  /* ---------- 权限与分组 ---------- */
+  .perm-grid { display: grid; grid-template-columns: 1fr; gap: 12px; margin-top: 14px; }
+  @media (min-width: 760px) { .perm-grid { grid-template-columns: 1fr 1fr; } }
+  .perm-card { padding: 14px 16px; margin-bottom: 0; }
+  .perm-title { font-size: 14px; font-weight: 600; margin-bottom: 10px; }
+  .perm-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 9px; align-items: center; }
+  .perm-row input, .perm-row select {
+    flex: 1; min-width: 110px; background: var(--card-soft); border: 1px solid var(--border); color: var(--text);
+    border-radius: 9px; padding: 7px 10px; font-size: 13px; outline: none;
+  }
+  .perm-row input:focus, .perm-row select:focus { border-color: var(--accent); }
+  .perm-check { display: inline-flex; gap: 5px; align-items: center; font-size: 12.5px; color: var(--text-dim); flex: none; }
+  .perm-list { display: flex; flex-direction: column; gap: 6px; max-height: 260px; overflow-y: auto; }
+  .perm-item {
+    display: flex; justify-content: space-between; gap: 8px; align-items: center;
+    background: var(--card-soft); border: 1px solid var(--border); border-radius: 9px;
+    padding: 7px 11px; font-size: 13px;
+  }
+  .perm-item .p-actions { display: flex; gap: 6px; flex: none; }
+  .identity-select {
+    max-width: 160px; background: var(--card); border: 1px solid var(--border); color: var(--text);
+    border-radius: 9px; padding: 6px 9px; font-size: 13px; outline: none;
+  }
+  .identity-select:focus { border-color: var(--accent); }
+
   /* ---------- 设置抽屉 ---------- */
   #drawer-mask { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 40; display: none; }
   #drawer-mask.show { display: block; }
@@ -261,6 +286,7 @@
 <header>
   <div class="brand">📚 企业知识库 RAG 控制台</div>
   <div class="header-actions">
+    <select id="identity-select" class="identity-select" title="当前身份（决定问答可见的知识组范围）"></select>
     <span class="conn-chip"><i class="dot" id="dot-import"></i>导入服务</span>
     <span class="conn-chip"><i class="dot" id="dot-query"></i>问答服务</span>
     <button class="icon-btn" id="theme-toggle" title="切换主题">🌙</button>
@@ -273,6 +299,7 @@
     <button class="tab active" data-tab="chat">💬 智能问答</button>
     <button class="tab" data-tab="import">📤 文档导入</button>
     <button class="tab" data-tab="chunks">🧩 切片管理</button>
+    <button class="tab" data-tab="perm">👥 权限与分组</button>
   </nav>
 
   <!-- ============ 问答面板 ============ -->
@@ -292,6 +319,10 @@
 
   <!-- ============ 导入面板 ============ -->
   <section id="panel-import" class="panel">
+    <div class="chunk-toolbar">
+      <span class="meta-label">导入到知识组：</span>
+      <select id="import-group-select" class="chunk-select"></select>
+    </div>
     <div id="drop-zone">
       <span class="big">📄</span>
       拖拽 <b>.md</b> / <b>.pdf</b> 文件到这里，或点击选择文件<br>
@@ -319,6 +350,7 @@
     <div id="chunk-add-form" class="import-card" hidden style="margin-top:12px">
       <div class="add-grid">
         <label>文档标题<input id="add-file-title" placeholder="所属文档标题"></label>
+        <label>知识组<select id="add-group-select"></select></label>
         <label>父级标题<input id="add-parent-title" placeholder="章节 / 父级标题"></label>
         <label>序号<input id="add-part" type="number" min="1" value="1"></label>
       </div>
@@ -334,6 +366,58 @@
       <button class="ghost-btn" id="chunk-prev">上一页</button>
       <span id="chunk-page-info" class="h-meta"></span>
       <button class="ghost-btn" id="chunk-next">下一页</button>
+    </div>
+  </section>
+
+  <!-- ============ 权限与分组面板 ============ -->
+  <section id="panel-perm" class="panel">
+    <div class="perm-grid">
+      <div class="import-card perm-card">
+        <div class="perm-title">🧠 知识组管理</div>
+        <div class="perm-row">
+          <input id="group-name" placeholder="知识组名称">
+          <input id="group-desc" placeholder="描述（可选）">
+          <button class="primary-btn" id="group-create">新建</button>
+          <button class="ghost-btn" id="backfill-btn" title="把未分组的历史切片全部归入默认知识组（幂等）">回填存量</button>
+        </div>
+        <div id="group-list" class="perm-list"></div>
+      </div>
+      <div class="import-card perm-card">
+        <div class="perm-title">👤 人员管理</div>
+        <div class="perm-row">
+          <input id="user-name" placeholder="姓名">
+          <input id="user-dept" placeholder="部门">
+          <input id="user-pos" placeholder="职位">
+          <label class="perm-check"><input type="checkbox" id="user-admin">管理员</label>
+          <button class="primary-btn" id="user-create">新建</button>
+        </div>
+        <div id="user-list" class="perm-list"></div>
+      </div>
+      <div class="import-card perm-card">
+        <div class="perm-title">🔗 授权配置（按部门/职位/具体人）</div>
+        <div class="perm-row">
+          <select id="grant-group-select" class="chunk-select"></select>
+          <button class="ghost-btn" id="grant-refresh">查授权</button>
+        </div>
+        <div class="perm-row">
+          <select id="grant-type" class="chunk-select" style="flex:0 0 120px">
+            <option value="department">按部门</option>
+            <option value="position">按职位</option>
+            <option value="user">按人员</option>
+          </select>
+          <input id="grant-value" placeholder="对象（如 研发部 / 工程师 / 张三）">
+          <button class="primary-btn" id="grant-add">授权</button>
+        </div>
+        <div id="grant-list" class="perm-list"></div>
+      </div>
+      <div class="import-card perm-card">
+        <div class="perm-title">👁 权限预览（该身份可见的知识组）</div>
+        <div class="perm-row">
+          <select id="preview-user-select" class="chunk-select"></select>
+          <button class="ghost-btn" id="preview-btn">预览</button>
+        </div>
+        <div id="preview-result" class="perm-list"></div>
+      </div>
     </div>
   </section>
 </div>
@@ -591,7 +675,7 @@ async function sendChat(question) {
     const resp = await fetch(`${S.queryBase}/query/sse`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: question, history: apiHistory.slice(0, -1).slice(-10) }),
+      body: JSON.stringify({ query: question, history: apiHistory.slice(0, -1).slice(-10), user_id: currentUserId() }),
     });
     if (!resp.ok || !resp.body) {
       const detail = await resp.json().catch(() => ({}));
@@ -778,6 +862,7 @@ async function startImport(file) {
   renderImportProgress({ status: 'pending' }, false);
   const fd = new FormData();
   fd.append('file', file);
+  fd.append('group_id', $('import-group-select').value || 0);
   try {
     const resp = await fetch(`${S.importBase}/import`, { method: 'POST', body: fd });
     const data = await resp.json();
@@ -863,6 +948,7 @@ function renderChunkCard(c) {
     <div class="import-head">
       <span class="meta-chip">id: ${c.id}</span>
       <span class="meta-chip">🧩 ${escapeHtml(c.parent_title || '')} · 第${c.part}片</span>
+      <span class="meta-chip">👥 ${escapeHtml(c.group_name || (c.group_id != null ? '组' + c.group_id : '未分组'))}</span>
       <span class="chunk-actions">
         <button class="mini-btn" data-act="edit">编辑</button>
         <button class="mini-btn" data-act="del">删除</button>
@@ -976,6 +1062,264 @@ $('chunk-list').addEventListener('click', async (e) => {
 
 document.querySelector('.tab[data-tab="chunks"]').addEventListener('click', () => { loadChunkDocs(); });
 
+/* ================= 身份与权限管理 ================= */
+const currentUserId = () => {
+  const v = localStorage.getItem('rag.userId');
+  return v ? parseInt(v, 10) : null;
+};
+
+async function loadIdentity() {
+  /* 拉人员列表：填充顶栏身份选择器 + 权限预览选择器，保留已选身份 */
+  const sel = $('identity-select');
+  const previewSel = $('preview-user-select');
+  try {
+    const resp = await fetch(`${S.importBase}/users`);
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    const users = data.users || [];
+    const options = '<option value="">未选择身份（仅默认组）</option>' +
+      users.map((u) => `<option value="${u.user_id}">${escapeHtml(u.name)}·${escapeHtml(u.department || '无部门')}</option>`).join('');
+    sel.innerHTML = options;
+    previewSel.innerHTML = users.map((u) =>
+      `<option value="${u.user_id}">${escapeHtml(u.name)}·${escapeHtml(u.department || '无部门')}</option>`).join('');
+    const saved = currentUserId();
+    if (saved && users.some((u) => u.user_id === saved)) sel.value = String(saved);
+  } catch (e) {
+    sel.innerHTML = '<option value="">身份加载失败</option>';
+  }
+}
+$('identity-select').addEventListener('change', function () {
+  if (this.value) localStorage.setItem('rag.userId', this.value);
+  else localStorage.removeItem('rag.userId');
+  toast('当前身份已切换,问答可见范围已更新', 'success');
+});
+
+async function loadGroupSelects() {
+  /* 拉知识组列表：填导入面板 / 切片新增 / 授权配置三处下拉（保留已选） */
+  try {
+    const resp = await fetch(`${S.importBase}/groups`);
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    const opts = (data.groups || []).map((g) =>
+      `<option value="${g.group_id}">${escapeHtml(g.name)}（${g.chunk_count}片）</option>`).join('');
+    for (const id of ['import-group-select', 'add-group-select', 'grant-group-select']) {
+      const sel = $(id);
+      const prev = sel.value;
+      sel.innerHTML = opts || '<option value="">暂无知识组</option>';
+      if (prev && (data.groups || []).some((g) => String(g.group_id) === prev)) sel.value = prev;
+    }
+  } catch (e) {
+    for (const id of ['import-group-select', 'add-group-select', 'grant-group-select']) {
+      $(id).innerHTML = '<option value="">加载失败</option>';
+    }
+  }
+}
+
+/* ---- 知识组管理 ---- */
+async function renderGroups() {
+  try {
+    const resp = await fetch(`${S.importBase}/groups`);
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    $('group-list').innerHTML = (data.groups || []).map((g) =>
+      `<div class="perm-item"><span>${escapeHtml(g.name)} <span class="meta-label">· ${g.chunk_count}片${g.description ? ' · ' + escapeHtml(g.description) : ''}</span></span>
+       <span class="p-actions">
+         <button class="mini-btn" data-act="g-rename" data-id="${g.group_id}" data-name="${escapeHtml(g.name)}">改名</button>
+         <button class="mini-btn" data-act="g-del" data-id="${g.group_id}">删除</button>
+       </span></div>`).join('') || '<div class="empty-hint">暂无知识组</div>';
+  } catch (e) {
+    $('group-list').innerHTML = `<div class="empty-hint">加载失败:${escapeHtml(e.message)}</div>`;
+  }
+}
+
+$('group-create').addEventListener('click', async () => {
+  const name = $('group-name').value.trim();
+  if (!name) { toast('知识组名称不能为空', 'error'); return; }
+  try {
+    const resp = await fetch(`${S.importBase}/groups`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, description: $('group-desc').value.trim() }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    toast('知识组已创建', 'success');
+    $('group-name').value = ''; $('group-desc').value = '';
+    renderGroups(); loadGroupSelects();
+  } catch (e) { toast('创建失败:' + e.message, 'error'); }
+});
+
+$('backfill-btn').addEventListener('click', async () => {
+  if (!confirm('把知识组为空的历史切片全部归入默认知识组？（幂等，可重复执行）')) return;
+  try {
+    const resp = await fetch(`${S.importBase}/admin/backfill-groups`, { method: 'POST' });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    toast(`回填完成:${data.backfilled}条归入默认组`, 'success');
+    renderGroups(); loadGroupSelects();
+  } catch (e) { toast('回填失败:' + e.message, 'error'); }
+});
+
+$('group-list').addEventListener('click', async (e) => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  const id = btn.dataset.id;
+  if (btn.dataset.act === 'g-rename') {
+    const name = prompt('新的知识组名称：', btn.dataset.name);
+    if (!name || name.trim() === btn.dataset.name) return;
+    try {
+      const resp = await fetch(`${S.importBase}/groups/${id}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim() }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+      toast('已改名', 'success'); renderGroups(); loadGroupSelects();
+    } catch (err) { toast('改名失败:' + err.message, 'error'); }
+  } else if (btn.dataset.act === 'g-del') {
+    if (!confirm('确认删除该知识组？（组内仍有切片时会被拒绝）')) return;
+    try {
+      const resp = await fetch(`${S.importBase}/groups/${id}`, { method: 'DELETE' });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+      toast('知识组已删除', 'success'); renderGroups(); loadGroupSelects();
+    } catch (err) { toast('删除失败:' + err.message, 'error'); }
+  }
+});
+
+/* ---- 人员管理 ---- */
+async function renderUsers() {
+  try {
+    const resp = await fetch(`${S.importBase}/users`);
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    $('user-list').innerHTML = (data.users || []).map((u) =>
+      `<div class="perm-item"><span>${escapeHtml(u.name)} <span class="meta-label">· ${escapeHtml(u.department || '无部门')} / ${escapeHtml(u.position || '无职位')}${u.is_admin ? ' · 管理员' : ''}</span></span>
+       <span class="p-actions">
+         <button class="mini-btn" data-act="u-edit" data-id="${u.user_id}">编辑</button>
+         <button class="mini-btn" data-act="u-del" data-id="${u.user_id}">删除</button>
+       </span></div>`).join('') || '<div class="empty-hint">暂无人员,先在上方创建</div>';
+  } catch (e) {
+    $('user-list').innerHTML = `<div class="empty-hint">加载失败:${escapeHtml(e.message)}</div>`;
+  }
+}
+
+$('user-create').addEventListener('click', async () => {
+  const payload = {
+    name: $('user-name').value.trim(),
+    department: $('user-dept').value.trim(),
+    position: $('user-pos').value.trim(),
+    is_admin: $('user-admin').checked,
+  };
+  if (!payload.name) { toast('姓名不能为空', 'error'); return; }
+  try {
+    const resp = await fetch(`${S.importBase}/users`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    toast('人员已创建', 'success');
+    $('user-name').value = ''; $('user-dept').value = ''; $('user-pos').value = ''; $('user-admin').checked = false;
+    renderUsers(); loadIdentity();
+  } catch (e) { toast('创建失败:' + e.message, 'error'); }
+});
+
+$('user-list').addEventListener('click', async (e) => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  const id = btn.dataset.id;
+  if (btn.dataset.act === 'u-edit') {
+    const department = prompt('部门（留空表示无部门）：');
+    if (department === null) return;
+    const position = prompt('职位（留空表示无职位）：');
+    if (position === null) return;
+    try {
+      const resp = await fetch(`${S.importBase}/users/${id}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ department, position }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+      toast('人员已更新', 'success'); renderUsers(); loadIdentity();
+    } catch (err) { toast('更新失败:' + err.message, 'error'); }
+  } else if (btn.dataset.act === 'u-del') {
+    if (!confirm('确认删除该人员？（其"按人"授权记录会一并清理）')) return;
+    try {
+      const resp = await fetch(`${S.importBase}/users/${id}`, { method: 'DELETE' });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+      toast('人员已删除', 'success'); renderUsers(); loadIdentity();
+    } catch (err) { toast('删除失败:' + err.message, 'error'); }
+  }
+});
+
+/* ---- 授权配置 ---- */
+const GRANT_TYPE_CN = { department: '部门', position: '职位', user: '人员' };
+
+async function renderGrants() {
+  const gid = $('grant-group-select').value;
+  if (!gid) { $('grant-list').innerHTML = '<div class="empty-hint">先选择知识组</div>'; return; }
+  try {
+    const resp = await fetch(`${S.importBase}/groups/${gid}/grants`);
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    $('grant-list').innerHTML = (data.grants || []).map((g) =>
+      `<div class="perm-item"><span>【${GRANT_TYPE_CN[g.subject_type] || g.subject_type}】${escapeHtml(g.subject_value)}</span>
+       <span class="p-actions"><button class="mini-btn" data-act="revoke" data-type="${g.subject_type}" data-value="${escapeHtml(g.subject_value)}">撤销</button></span></div>`).join('') ||
+      '<div class="empty-hint">暂无授权（默认组对所有身份可见）</div>';
+  } catch (e) {
+    $('grant-list').innerHTML = `<div class="empty-hint">加载失败:${escapeHtml(e.message)}</div>`;
+  }
+}
+$('grant-refresh').addEventListener('click', renderGrants);
+$('grant-group-select').addEventListener('change', renderGrants);
+
+$('grant-add').addEventListener('click', async () => {
+  const gid = $('grant-group-select').value;
+  const payload = { subject_type: $('grant-type').value, subject_value: $('grant-value').value.trim() };
+  if (!gid || !payload.subject_value) { toast('先选知识组并填写授权对象', 'error'); return; }
+  try {
+    const resp = await fetch(`${S.importBase}/groups/${gid}/grants`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    toast('授权成功', 'success'); $('grant-value').value = ''; renderGrants();
+  } catch (e) { toast('授权失败:' + e.message, 'error'); }
+});
+
+$('grant-list').addEventListener('click', async (e) => {
+  const btn = e.target.closest('button');
+  if (!btn || btn.dataset.act !== 'revoke') return;
+  const gid = $('grant-group-select').value;
+  if (!confirm(`确认撤销授权【${GRANT_TYPE_CN[btn.dataset.type]}：${btn.dataset.value}】？`)) return;
+  try {
+    const qs = `subject_type=${encodeURIComponent(btn.dataset.type)}&subject_value=${encodeURIComponent(btn.dataset.value)}`;
+    const resp = await fetch(`${S.importBase}/groups/${gid}/grants?${qs}`, { method: 'DELETE' });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    toast('已撤销', 'success'); renderGrants();
+  } catch (err) { toast('撤销失败:' + err.message, 'error'); }
+});
+
+/* ---- 权限预览 ---- */
+$('preview-btn').addEventListener('click', async () => {
+  const uid = $('preview-user-select').value;
+  if (!uid) { toast('先选择要预览的人员', 'error'); return; }
+  try {
+    const resp = await fetch(`${S.importBase}/access/${uid}`);
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    $('preview-result').innerHTML = (data.groups || []).map((g) =>
+      `<div class="perm-item"><span>✅ ${escapeHtml(g.name)}</span><span class="meta-label">${g.chunk_count}片</span></div>`).join('') ||
+      '<div class="empty-hint">无可见组</div>';
+  } catch (e) {
+    $('preview-result').innerHTML = `<div class="empty-hint">预览失败:${escapeHtml(e.message)}</div>`;
+  }
+});
+
+document.querySelector('.tab[data-tab="perm"]').addEventListener('click', () => {
+  renderGroups(); renderUsers(); renderGrants();
+});
+
 /* ================= 测试按钮 / 初始化 ================= */
 $('test-import').addEventListener('click', async () => {
   const ok = await pingService($('input-import').value.trim().replace(/\/+$/, ''));
@@ -988,6 +1332,8 @@ $('test-query').addEventListener('click', async () => {
 
 initTheme();
 renderHistory();
+loadIdentity();
+loadGroupSelects();
 checkAll();
 </script>
 </body>

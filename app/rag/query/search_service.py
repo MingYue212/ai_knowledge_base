@@ -9,7 +9,7 @@
 from app.infra.vectorstore.milvus_gateway import milvus_gateway
 from app.process.query.agent.state import QueryGraphState
 from app.rag.query.config import SEARCH_TOP_K
-from app.shared.clients.milvus_utils import create_hybrid_search_requests
+from app.shared.clients.milvus_utils import build_group_filter_expr, create_hybrid_search_requests
 from app.shared.model.embedding_utils import generate_query_embeddings
 from app.shared.runtime.logger import logger, step_log
 
@@ -36,8 +36,11 @@ def search_chunks(state: QueryGraphState) -> QueryGraphState:
         "sparse": embeddings["sparse"][0],
     }
 
-    # 3.组装稠密+稀疏两路检索请求，交由Milvus服务端RRF融合
-    requests = create_hybrid_search_requests(query_embedding, limit=SEARCH_TOP_K)
+    # 3.组装稠密+稀疏两路检索请求，交由Milvus服务端RRF融合（带知识组权限过滤下推）
+    group_expr = build_group_filter_expr(state.get("allowed_group_ids"))
+    if group_expr:
+        logger.info(f"知识组权限过滤已生效:{group_expr}")
+    requests = create_hybrid_search_requests(query_embedding, limit=SEARCH_TOP_K, expr=group_expr)
     hits: list[dict] = milvus_gateway.search_chunks(requests, top_k=SEARCH_TOP_K)
 
     # 4.写回状态：空召回不中断（答案节点有兜底话术）

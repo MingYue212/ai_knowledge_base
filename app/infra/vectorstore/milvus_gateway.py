@@ -62,6 +62,7 @@ class MilvusGateway:
         collection_name = self.chunks_collection
         if self.client.has_collection(collection_name):
             logger.debug(f"集合[{collection_name}]已存在,跳过创建")
+            self.migrate_add_group_field(collection_name)
             return
 
         logger.info(f"集合[{collection_name}]不存在,开始创建!稠密维度={dense_dim},混合向量(bge-m3)schema")
@@ -73,6 +74,8 @@ class MilvusGateway:
         schema.add_field("part", DataType.INT64)
         schema.add_field("sparse_vector", DataType.SPARSE_FLOAT_VECTOR)
         schema.add_field("dense_vector", DataType.FLOAT_VECTOR, dim=dense_dim)
+        # 知识组归属（权限过滤用）：nullable，存量行读出为 None，由回填端点归入默认组
+        schema.add_field("group_id", DataType.INT64, nullable=True)
 
         index_params = self.client.prepare_index_params()
         index_params.add_index(
@@ -117,6 +120,7 @@ class MilvusGateway:
         collection_name = self.item_name_collection
         if self.client.has_collection(collection_name):
             logger.debug(f"集合[{collection_name}]已存在,跳过创建")
+            self.migrate_add_group_field(collection_name)
             return
 
         logger.info(f"集合[{collection_name}]不存在,开始创建!稠密维度={dense_dim}")
@@ -124,6 +128,7 @@ class MilvusGateway:
         schema.add_field("id", DataType.INT64, is_primary=True)
         schema.add_field("item_name", DataType.VARCHAR, max_length=512)
         schema.add_field("dense_vector", DataType.FLOAT_VECTOR, dim=dense_dim)
+        schema.add_field("group_id", DataType.INT64, nullable=True)
 
         index_params = self.client.prepare_index_params()
         index_params.add_index(
@@ -163,12 +168,84 @@ class MilvusGateway:
             collection_name=self.chunks_collection,
             requests=requests,
             top_k=top_k,
-            output_fields=["id", "chunk_text", "file_title", "parent_title", "part"],
+            output_fields=["id", "chunk_text", "file_title", "parent_title", "part", "group_id"],
         )
 
     # ---------- 切片管理（chunk 手动管理，业务入口见 rag/import_/chunk_manage_service） ----------
 
-    _CHUNK_OUTPUT_FIELDS = ["id", "chunk_text", "file_title", "parent_title", "part"]
+    _CHUNK_OUTPUT_FIELDS = ["id", "chunk_text", "file_title", "parent_title", "part", "group_id"]
+
+    def migrate_add_group_field(self, collection_name: str) -> bool:
+        """
+        给既有集合补 group_id 标量字段（幂等，pymilvus 2.6 的 add_collection_field）。
+
+        Args:
+            collection_name: 目标集合名。
+
+        Returns:
+            bool: 是否实际发生了迁移（已有该字段则为 False）。
+        """
+        desc = self.client.describe_collection(collection_name=collection_name)
+        field_names = {field.get("name") for field in desc.get("fields", [])}
+        if "group_id" in field_names:
+            return False
+        self.client.add_collection_field(
+            collection_name=collection_name, field_name="group_id", data_type=DataType.INT64
+        )
+        logger.info(f"集合[{collection_name}]已补group_id字段(nullable,存量行为None)")
+        return True
+
+    def count_chunks_by_group(self, group_id: int) -> int:
+        """
+        统计某知识组下的切片数量（count(*) 服务端聚合）。
+
+        Args:
+            group_id: 知识组 id。
+
+        Returns:
+            int: 切片数量。
+        """
+        rows = self.client.query(
+            collection_name=self.chunks_collection,
+            filter=f"group_id == {int(group_id)}",
+            output_fields=["count(*)"],
+        )
+        return int(rows[0].get("count(*)", 0)) if rows else 0
+
+    def backfill_group_ids(self, default_group_id: int) -> int:
+        """
+        把 group_id 为空（存量/迁移遗留）的切片回填进默认知识组。
+
+        实现说明：query 取回全字段（含双向量）后在客户端筛出 group_id 为 None 的行，
+        带主键 upsert 覆盖（auto_id 集合更新行的标准方式）；不依赖 IS NULL 表达式。
+
+        Args:
+            default_group_id: 默认知识组 id。
+
+        Returns:
+            int: 本次回填的切片条数（单次扫描上限 16384，超出会有告警日志）。
+        """
+        rows = self.client.query(
+            collection_name=self.chunks_collection,
+            filter="id >= 0",
+            output_fields=["id", "chunk_text", "file_title", "parent_title", "part",
+                           "sparse_vector", "dense_vector", "group_id"],
+            limit=16384,
+        )
+        targets = []
+        for row in rows:
+            if row.get("group_id") is None:
+                fixed = dict(row)
+                fixed["group_id"] = int(default_group_id)
+                targets.append(fixed)
+        if len(rows) >= 16384:
+            logger.warning("backfill_group_ids单次扫描达上限16384,可能存在未回填数据,请再次执行!")
+        if not targets:
+            logger.info("无需回填:所有切片均已有知识组归属")
+            return 0
+        self.client.upsert(collection_name=self.chunks_collection, data=targets)
+        logger.info(f"存量切片回填完成,共{len(targets)}条归入默认组:{default_group_id}")
+        return len(targets)
 
     def query_chunks(self, filter_expr: str, limit: int, offset: int = 0) -> list[dict]:
         """

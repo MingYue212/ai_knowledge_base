@@ -21,6 +21,7 @@ from app.shared.utils.path_util import PROJECT_ROOT
 from app.api.schemas.query_schemas import QueryRequest, QueryResponse
 from app.process.query.agent.main_graph import query_app
 from app.process.query.agent.state import create_default_state
+from app.infra.persistence.sqlite_gateway import sqlite_gateway
 from app.shared.config.settings_config import settings
 from app.shared.runtime.logger import logger
 from app.shared.utils.sse_utils import SSEEvent, create_sse_queue, push_to_session, sse_generator
@@ -46,11 +47,22 @@ app.add_middleware(
 )
 
 
-def _run_query_task(task_id: str, query: str, history: list[dict]) -> None:
+def _resolve_allowed_groups(user_id: int | None) -> list[int]:
+    """按身份解析可见知识组；未选身份仅默认知识组，身份失效（已被删）同样回退默认组并告警。"""
+    try:
+        if user_id:
+            return sqlite_gateway.resolve_user_group_ids(int(user_id))
+    except ValueError as e:
+        logger.warning(f"身份解析失败,回退默认知识组:{str(e)}")
+    return [sqlite_gateway.get_default_group_id()]
+
+
+def _run_query_task(task_id: str, query: str, history: list[dict], allowed_group_ids: list[int]) -> None:
     """后台线程：流式跑查询图，逐节点推进度，结束推 FINAL（带答案）/ERROR，最后推 CLOSE。"""
     try:
-        # 1.初始化查询状态并标记任务处理中
-        state = create_default_state(task_id=task_id, query=query, history=history)
+        # 1.初始化查询状态并标记任务处理中（allowed_group_ids 供检索时做知识组权限过滤）
+        state = create_default_state(task_id=task_id, query=query, history=history,
+                                     allowed_group_ids=allowed_group_ids)
         update_task_status(task_id, TASK_STATUS_PROCESSING)
 
         # 2.逐节点流式执行：每个节点更新后推送一次进度快照
@@ -88,7 +100,8 @@ def query(request: QueryRequest) -> QueryResponse:
     """同步问答：invoke 查询图，返回最终答案（含识别商品与改写后问题）。"""
     task_id = uuid4().hex
     history = [item.model_dump() for item in request.history]
-    state = create_default_state(task_id=task_id, query=request.query, history=history)
+    state = create_default_state(task_id=task_id, query=request.query, history=history,
+                                 allowed_group_ids=_resolve_allowed_groups(request.user_id))
     final_state = query_app.invoke(state)
     answer = str(final_state.get("answer") or "")
     logger.info(f"同步问答完成:{task_id},答案长度:{len(answer)}")
@@ -97,7 +110,6 @@ def query(request: QueryRequest) -> QueryResponse:
         item_names=list(final_state.get("item_names") or []),
         rewritten_query=str(final_state.get("rewritten_query") or ""),
     )
-
 
 @app.post("/query/sse")
 def query_sse(request: QueryRequest, http_request: Request) -> StreamingResponse:
@@ -109,7 +121,11 @@ def query_sse(request: QueryRequest, http_request: Request) -> StreamingResponse
     history = [item.model_dump() for item in request.history]
 
     # 2.后台线程执行查询图，接口立即返回 SSE 流
-    threading.Thread(target=_run_query_task, args=(task_id, request.query, history), daemon=True).start()
+    threading.Thread(
+        target=_run_query_task,
+        args=(task_id, request.query, history, _resolve_allowed_groups(request.user_id)),
+        daemon=True,
+    ).start()
     return StreamingResponse(sse_generator(task_id, http_request), media_type="text/event-stream")
 
 

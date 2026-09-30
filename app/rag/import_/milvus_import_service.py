@@ -7,10 +7,16 @@
 3. 批量插入 chunks 集合；若 state["item_name"] 非空，
    额外把主体名称向量化后写入主体名称集合（主体索引）
 """
+from app.infra.persistence.sqlite_gateway import sqlite_gateway
 from app.infra.vectorstore.milvus_gateway import milvus_gateway
 from app.process.import_.agent.state import ImportGraphState
 from app.shared.model.embedding_utils import generate_embeddings
 from app.shared.runtime.logger import logger, step_log
+
+
+def _resolve_group_id(state: ImportGraphState) -> int:
+    """解析本次导入的知识组归属：state.group_id 优先（API 层负责把"未指定"解析成默认组），0/缺失再兜底。"""
+    return int(state.get("group_id") or 0) or sqlite_gateway.get_default_group_id()
 
 
 @step_log("build_chunk_entities")
@@ -34,7 +40,8 @@ def build_chunk_entities(state: ImportGraphState) -> list[dict]:
         )
         raise ValueError("chunks与embedding_context数量不一致!无法组装入库实体,提前终止!!")
 
-    # 3.逐条组装实体，字段名与milvus_gateway的chunks集合schema一一对应
+    # 3.逐条组装实体，字段名与milvus_gateway的chunks集合schema一一对应（group_id为知识组归属）
+    group_id = _resolve_group_id(state)
     entities: list[dict] = []
     for chunk, embedding in zip(chunks, embedding_context):
         entities.append({
@@ -44,8 +51,9 @@ def build_chunk_entities(state: ImportGraphState) -> list[dict]:
             "part": int(chunk.get("part", 1)),
             "sparse_vector": embedding.get("sparse") or {},
             "dense_vector": embedding.get("dense") or [],
+            "group_id": group_id,
         })
-    logger.info(f"完成{len(entities)}个入库实体的组装")
+    logger.info(f"完成{len(entities)}个入库实体的组装,知识组:{group_id}")
     return entities
 
 
@@ -70,13 +78,14 @@ def import_chunks_to_milvus(state: ImportGraphState) -> ImportGraphState:
     milvus_gateway.insert_chunks(entities)
     logger.info(f"完成{len(entities)}个切块的Milvus入库!")
 
-    # 3.主体名称索引：item_name为空时跳过（第0步识别节点为直通实现，通常为空）
+    # 3.主体名称索引：item_name为空时跳过；主体名与文档切片归入同一知识组
     item_name: str = (state.get("item_name") or "").strip()
     if item_name:
         name_embeddings = generate_embeddings([item_name])
         name_entity = {
             "item_name": item_name,
             "dense_vector": name_embeddings["dense"][0],
+            "group_id": _resolve_group_id(state),
         }
         milvus_gateway.ensure_item_name_collection(len(name_entity["dense_vector"]))
         milvus_gateway.insert_item_name(name_entity)

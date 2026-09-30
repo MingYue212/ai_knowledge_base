@@ -19,7 +19,7 @@ from langchain_core.messages import HumanMessage
 from app.infra.vectorstore.milvus_gateway import milvus_gateway
 from app.process.query.agent.state import QueryGraphState
 from app.rag.query.config import SEARCH_TOP_K
-from app.shared.clients.milvus_utils import create_hybrid_search_requests
+from app.shared.clients.milvus_utils import build_group_filter_expr, create_hybrid_search_requests
 from app.shared.model.embedding_utils import generate_query_embeddings
 from app.shared.model.lm_utils import get_llm_client
 from app.shared.runtime.load_prompt import load_prompt
@@ -60,8 +60,9 @@ def search_by_hyde(state: QueryGraphState) -> QueryGraphState:
             "sparse": embeddings["sparse"][0],
         }
 
-        # 4.组装稠密+稀疏两路请求，以"假设性回答"为检索文本召回切片
-        requests = create_hybrid_search_requests(hyde_embedding, limit=SEARCH_TOP_K)
+        # 4.组装稠密+稀疏两路请求，以"假设性回答"为检索文本召回切片（带知识组权限过滤下推）
+        group_expr = build_group_filter_expr(state.get("allowed_group_ids"))
+        requests = create_hybrid_search_requests(hyde_embedding, limit=SEARCH_TOP_K, expr=group_expr)
         hits: list[dict] = milvus_gateway.search_chunks(requests, top_k=SEARCH_TOP_K)
 
         # 5.写回状态：空召回不中断（RRF融合时自动退化为仅主路）

@@ -11,9 +11,10 @@ class HistoryMessage(BaseModel):
 
 
 class QueryRequest(BaseModel):
-    """查询请求体：用户问题 + 可选历史对话。"""
+    """查询请求体：用户问题 + 可选历史对话 + 当前身份。"""
     query: str = Field(..., min_length=1, description="用户问题")
     history: list[HistoryMessage] = Field(default_factory=list, description="历史对话（用于指代消解）")
+    user_id: int | None = Field(default=None, description="当前用户 id（缺失时仅可见默认知识组）")
 
 
 class QueryResponse(BaseModel):

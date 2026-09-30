@@ -16,19 +16,32 @@ import threading
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 
 from app.api.schemas.import_schemas import (
+    AccessPreviewResponse,
+    BackfillResponse,
     ChunkCreateRequest,
     ChunkDocumentListResponse,
     ChunkListResponse,
     ChunkMutationResponse,
     ChunkUpdateRequest,
+    GrantListResponse,
+    GrantRequest,
+    GroupCreateRequest,
+    GroupInfo,
+    GroupListResponse,
+    GroupUpdateRequest,
     ImportResponse,
     ProgressResponse,
+    UserCreateRequest,
+    UserInfo,
+    UserListResponse,
+    UserUpdateRequest,
 )
+from app.infra.persistence.sqlite_gateway import sqlite_gateway
 from app.process.import_.agent.main_graph import import_app
 from app.process.import_.agent.state import create_default_state
 from app.rag.import_.chunk_manage_service import (
@@ -72,11 +85,11 @@ app.add_middleware(
 )
 
 
-def _run_import_task(task_id: str, local_file_path: str) -> None:
+def _run_import_task(task_id: str, local_file_path: str, group_id: int = 0) -> None:
     """后台线程：流式跑导入图，逐节点推进度，结束推 FINAL/ERROR，最后推 CLOSE。"""
     try:
-        # 1.初始化导入状态并标记任务处理中
-        state = create_default_state(task_id=task_id, local_file_path=local_file_path)
+        # 1.初始化导入状态并标记任务处理中（group_id 0/缺失由服务层兜底解析默认组）
+        state = create_default_state(task_id=task_id, local_file_path=local_file_path, group_id=int(group_id))
         update_task_status(task_id, TASK_STATUS_PROCESSING)
         logger.info(f"导入任务开始执行:{task_id},文件:{local_file_path}")
 
@@ -99,8 +112,8 @@ def _run_import_task(task_id: str, local_file_path: str) -> None:
 
 
 @app.post("/import", response_model=ImportResponse)
-async def import_document(file: UploadFile = File(...)) -> ImportResponse:
-    """上传文档并启动导入任务（.md/.pdf），返回 task_id 供进度查询/SSE订阅。"""
+async def import_document(file: UploadFile = File(...), group_id: int = Form(0)) -> ImportResponse:
+    """上传文档并启动导入任务（.md/.pdf），返回 task_id 供进度查询/SSE订阅。group_id 缺省归默认知识组。"""
     # 1.校验文件类型：文件名取 Path(...).name 防路径穿越，后缀白名单校验
     filename = Path(file.filename or "").name
     suffix = Path(filename).suffix.lower()
@@ -120,9 +133,13 @@ async def import_document(file: UploadFile = File(...)) -> ImportResponse:
     # 3.初始化任务状态与 SSE 队列（队列先建，后台线程才有地方推进度）
     create_sse_queue(task_id)
     update_task_status(task_id, TASK_STATUS_PENDING)
+    resolved_group_id = int(group_id or 0) or sqlite_gateway.get_default_group_id()
+    logger.info(f"导入任务已创建:{task_id},文件:{filename},知识组:{resolved_group_id}")
 
     # 4.后台线程执行导入图，接口立即返回 task_id
-    threading.Thread(target=_run_import_task, args=(task_id, str(save_path)), daemon=True).start()
+    threading.Thread(
+        target=_run_import_task, args=(task_id, str(save_path), resolved_group_id), daemon=True
+    ).start()
     return ImportResponse(task_id=task_id)
 
 
@@ -172,14 +189,20 @@ def chunk_list(
         result = list_chunks(file_title=file_title, page=page, page_size=page_size)
     except Exception as e:
         raise _map_chunk_error(e) from e
+    # 补充知识组名称（管理页展示用；切片 Milvus 行只存 group_id）
+    name_map = {g["group_id"]: g["name"] for g in sqlite_gateway.list_groups()}
+    for item in result["items"]:
+        gid = item.get("group_id")
+        item["group_name"] = name_map.get(int(gid)) if gid is not None else None
     return ChunkListResponse(**result)
 
 
 @app.post("/chunks", response_model=ChunkMutationResponse)
 def chunk_create(request: ChunkCreateRequest) -> ChunkMutationResponse:
-    """手动新增切片：校验 + 自动向量化 + 入库。"""
+    """手动新增切片：校验 + 自动向量化 + 入库（group_id 缺省归默认知识组）。"""
     try:
-        result = add_chunk(request.file_title, request.parent_title, request.part, request.chunk_text)
+        result = add_chunk(request.file_title, request.parent_title, request.part,
+                           request.chunk_text, request.group_id)
     except Exception as e:
         raise _map_chunk_error(e) from e
     return ChunkMutationResponse(new_id=result.get("id"), chunk=result)
@@ -205,6 +228,152 @@ def chunk_delete(chunk_id: int) -> dict:
     except Exception as e:
         raise _map_chunk_error(e) from e
     return {"ok": True, "id": chunk_id}
+
+
+# ---------------- 知识组 / 人员 / 授权（权限体系管理，本期不做接口鉴权） ----------------
+
+def _group_infos() -> list[GroupInfo]:
+    """知识组列表（含各组切片数量，Milvus count(*) 聚合；Milvus 异常时计数置 0 不阻断列表）。"""
+    infos = []
+    for group in sqlite_gateway.list_groups():
+        try:
+            count = milvus_gateway.count_chunks_by_group(group["group_id"])
+        except Exception as e:
+            logger.warning(f"知识组切片计数失败,组:{group['group_id']}:{str(e)}")
+            count = 0
+        infos.append(GroupInfo(**group, chunk_count=count))
+    return infos
+
+
+@app.get("/groups", response_model=GroupListResponse)
+def group_list() -> GroupListResponse:
+    """列出全部知识组（含切片数量）。"""
+    return GroupListResponse(groups=_group_infos())
+
+
+@app.post("/groups", response_model=GroupInfo)
+def group_create(request: GroupCreateRequest) -> GroupInfo:
+    """新建知识组。"""
+    try:
+        group = sqlite_gateway.create_group(request.name, request.description)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return GroupInfo(**group)
+
+
+@app.patch("/groups/{group_id}", response_model=GroupInfo)
+def group_update(group_id: int, request: GroupUpdateRequest) -> GroupInfo:
+    """更新知识组名称/描述（默认组不允许改名）。"""
+    try:
+        group = sqlite_gateway.update_group(group_id, request.name, request.description)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return GroupInfo(**group)
+
+
+@app.delete("/groups/{group_id}")
+def group_delete(group_id: int) -> dict:
+    """删除知识组：默认组拒绝；组内仍有切片时拒绝（需先迁移/删除切片）。"""
+    try:
+        count = milvus_gateway.count_chunks_by_group(group_id)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Milvus不可用,无法确认组内切片数量:{str(e)}") from e
+    if count > 0:
+        raise HTTPException(status_code=400, detail=f"知识组内仍有{count}个切片,请先迁移或删除后再删除知识组!")
+    try:
+        sqlite_gateway.delete_group(group_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"ok": True, "group_id": group_id}
+
+
+@app.get("/users", response_model=UserListResponse)
+def user_list() -> UserListResponse:
+    """列出全部人员。"""
+    return UserListResponse(users=sqlite_gateway.list_users())
+
+
+@app.post("/users", response_model=UserInfo)
+def user_create(request: UserCreateRequest) -> UserInfo:
+    """新建人员（姓名/部门/职位/是否管理员）。"""
+    try:
+        user = sqlite_gateway.create_user(request.name, request.department, request.position, request.is_admin)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return UserInfo(**user)
+
+
+@app.patch("/users/{user_id}", response_model=UserInfo)
+def user_update(user_id: int, request: UserUpdateRequest) -> UserInfo:
+    """更新人员信息（改名会联动按"具体人"的授权记录）。"""
+    try:
+        user = sqlite_gateway.update_user(user_id, request.name, request.department,
+                                          request.position, request.is_admin)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return UserInfo(**user)
+
+
+@app.delete("/users/{user_id}")
+def user_delete(user_id: int) -> dict:
+    """删除人员（并清理按"具体人"对其的授权）。"""
+    try:
+        sqlite_gateway.delete_user(user_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"ok": True, "user_id": user_id}
+
+
+@app.get("/groups/{group_id}/grants", response_model=GrantListResponse)
+def grant_list(group_id: int) -> GrantListResponse:
+    """列出某知识组的全部授权记录。"""
+    return GrantListResponse(group_id=group_id, grants=sqlite_gateway.list_grants(group_id))
+
+
+@app.post("/groups/{group_id}/grants", response_model=GrantListResponse)
+def grant_add(group_id: int, request: GrantRequest) -> GrantListResponse:
+    """给知识组追加授权（部门/职位/具体人，命中任一即可见）。"""
+    try:
+        sqlite_gateway.add_grant(group_id, request.subject_type, request.subject_value)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return GrantListResponse(group_id=group_id, grants=sqlite_gateway.list_grants(group_id))
+
+
+@app.delete("/groups/{group_id}/grants", response_model=GrantListResponse)
+def grant_remove(group_id: int, subject_type: str = Query(...), subject_value: str = Query(...)) -> GrantListResponse:
+    """撤销一条授权（按类型+对象定位）。"""
+    try:
+        sqlite_gateway.remove_grant(group_id, subject_type, subject_value)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return GrantListResponse(group_id=group_id, grants=sqlite_gateway.list_grants(group_id))
+
+
+@app.get("/access/{user_id}", response_model=AccessPreviewResponse)
+def access_preview(user_id: int) -> AccessPreviewResponse:
+    """预览某人员可见的知识组（权限解析结果，前端展示与联调用）。"""
+    try:
+        group_ids = sqlite_gateway.resolve_user_group_ids(user_id)
+        user = sqlite_gateway.get_user(user_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    infos = {info.group_id: info for info in _group_infos()}
+    groups = [infos.get(gid, GroupInfo(group_id=gid, name=f"知识组{gid}")) for gid in group_ids]
+    return AccessPreviewResponse(user_id=user_id, name=user["name"] if user else str(user_id), groups=groups)
+
+
+@app.post("/admin/backfill-groups", response_model=BackfillResponse)
+def admin_backfill_groups() -> BackfillResponse:
+    """把知识组字段为空的存量切片一键回填默认知识组（迁移用，幂等可重复执行）。"""
+    try:
+        default_id = sqlite_gateway.get_default_group_id()
+        backfilled = milvus_gateway.backfill_group_ids(default_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Milvus不可用,回填失败:{str(e)}") from e
+    return BackfillResponse(backfilled=backfilled, default_group_id=default_id)
 
 
 # 前端控制台（单页应用，两服务共用同一页面，/docs 仍可用作接口调试）

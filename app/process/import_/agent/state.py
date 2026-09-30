@@ -26,6 +26,7 @@ class ImportGraphState(TypedDict):
     chunks: list[dict]
     item_name: str
     embedding_context: list[dict]
+    group_id: int
 
 
 # 模板对象
@@ -42,6 +43,7 @@ graph_default_state: ImportGraphState = {
     "chunks": [],
     "item_name": "",
     "embedding_context": [],
+    "group_id": 0,
 }
 
 
