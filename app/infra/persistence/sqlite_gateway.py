@@ -9,6 +9,7 @@ SQLite 元数据网关：知识组 / 人员 / 授权关系的持久化（权限�
   一个组可按部门 / 职位 / 具体人三种方式授权，命中任一即可访问
 - db_path 可注入（单测用临时库），默认 PROJECT_ROOT/data/metadata.db
 """
+import json
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -19,6 +20,28 @@ from app.shared.utils.path_util import PROJECT_ROOT
 # 授权主体类型白名单
 SUBJECT_TYPES = ("department", "position", "user")
 DEFAULT_GROUP_NAME = "默认知识组"
+
+# 回答类型（引擎明确上报，不靠猜文案；借鉴管理平台讲义模块十的口径）
+ANSWER_TYPE_NORMAL = 0           # 正常回答
+ANSWER_TYPE_NO_KNOWLEDGE = 1     # 资料缺失拒答（计入知识缺失）
+ANSWER_TYPE_PERMISSION_DENIED = 2  # 权限拒答（预留，本期引擎不产生）
+ANSWER_TYPE_CLARIFY = 3          # 澄清追问（预留，本期引擎不产生）
+# 反馈状态
+FEEDBACK_NONE = 0                # 未反馈
+FEEDBACK_HELPFUL = 1             # 有帮助
+FEEDBACK_UNHELPFUL = 2           # 无帮助（计入知识缺失）
+
+
+class QueryLogNotFoundError(ValueError):
+    """查询日志不存在（API 层转 404）。"""
+
+
+class FeedbackNotAllowedError(ValueError):
+    """反馈不被允许（仅正常回答可反馈，API 层转 400）。"""
+
+
+class FeedbackForbiddenError(ValueError):
+    """只能反馈本人的问答记录（API 层转 403）。"""
 
 # 默认库路径（data/ 已在 .gitignore）
 DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "metadata.db"
@@ -46,6 +69,21 @@ CREATE TABLE IF NOT EXISTS group_grants (
     created_at    TEXT NOT NULL DEFAULT (datetime('now','localtime')),
     UNIQUE(group_id, subject_type, subject_value)
 );
+CREATE TABLE IF NOT EXISTS query_logs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id         TEXT NOT NULL DEFAULT '',
+    user_id         INTEGER,
+    query           TEXT NOT NULL,
+    rewritten_query TEXT NOT NULL DEFAULT '',
+    item_names      TEXT NOT NULL DEFAULT '[]',
+    answer          TEXT NOT NULL DEFAULT '',
+    answer_type     INTEGER NOT NULL DEFAULT 0,
+    feedback_status INTEGER NOT NULL DEFAULT 0,
+    gap_handled     INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_query_logs_gap
+    ON query_logs(answer_type, feedback_status, gap_handled);
 """
 
 
@@ -298,6 +336,117 @@ class SqliteGateway:
         logger.info(f"权限解析完成,用户:{user['name']},可见组:{group_ids}")
         return group_ids
 
+    # ---------------- 查询日志 / 知识缺失 ----------------
+
+    @staticmethod
+    def _log_dict(row) -> dict:
+        """日志行转字典（item_names JSON 还原为列表）。"""
+        data = dict(row)
+        try:
+            data["item_names"] = json.loads(data.get("item_names") or "[]")
+        except Exception:
+            data["item_names"] = []
+        return data
+
+    def insert_query_log(self, task_id: str, user_id: int | None, query: str, rewritten_query: str,
+                         item_names: list, answer: str, answer_type: int) -> int:
+        """
+        写入一条普通查询日志（知识缺失/后续看板的数据源头）。
+
+        Args:
+            task_id: 查询任务 id（便于对齐 SSE 过程）
+            user_id: 提问人 id（未选身份时为 None）
+            query: 原始问题
+            rewritten_query: 改写后的问题
+            item_names: 命中的商品/主体名列表（JSON 存储）
+            answer: 最终答案全文
+            answer_type: 回答类型（0 正常 / 1 资料缺失拒答 / 2 权限拒答 / 3 澄清追问）
+
+        Returns:
+            int: 日志 id（前端反馈按钮需要）
+        """
+        with self._connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO query_logs(task_id, user_id, query, rewritten_query, item_names, answer, answer_type) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (task_id, user_id, query, rewritten_query or "",
+                 json.dumps(list(item_names or []), ensure_ascii=False), answer, int(answer_type)),
+            )
+        log_id = int(cur.lastrowid)
+        logger.info(f"查询日志已写入,id:{log_id},answer_type:{answer_type}")
+        return log_id
+
+    def get_query_log(self, log_id: int) -> dict | None:
+        """按 id 取查询日志；不存在返回 None。"""
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM query_logs WHERE id = ?", (int(log_id),)).fetchone()
+        return self._log_dict(row) if row else None
+
+    def set_feedback(self, log_id: int, feedback_status: int, user_id: int | None) -> None:
+        """
+        提交问答帮助度反馈（借鉴讲义模块十的边界规则）。
+
+        防御性校验：
+        1. 仅正常回答（answer_type=0）可反馈——拒答直接计入知识缺失，不需要用户再点无帮助
+        2. 仅本人日志可反馈（日志无归属时放开，适配未选身份的演示场景）
+        """
+        if feedback_status not in (FEEDBACK_NONE, FEEDBACK_HELPFUL, FEEDBACK_UNHELPFUL):
+            raise ValueError(f"反馈状态不合法:{feedback_status}")
+        log = self.get_query_log(log_id)
+        if log is None:
+            raise QueryLogNotFoundError(f"日志不存在:id={log_id}")
+        if log["answer_type"] != ANSWER_TYPE_NORMAL:
+            raise FeedbackNotAllowedError("仅正常回答支持反馈,拒答记录已直接计入知识缺失!")
+        if log["user_id"] is not None and user_id is not None and int(log["user_id"]) != int(user_id):
+            raise FeedbackForbiddenError("只能反馈本人的问答记录!")
+        with self._connect() as conn:
+            conn.execute("UPDATE query_logs SET feedback_status = ? WHERE id = ?",
+                         (int(feedback_status), int(log_id)))
+        logger.info(f"反馈已提交,log:{log_id},feedback:{feedback_status}")
+
+    def list_gaps(self, page: int, page_size: int, gap_filter: str) -> dict:
+        """
+        知识缺失运营视图：资料缺失拒答（answer_type=1）∪ 无帮助反馈（feedback_status=2）的查询日志。
+
+        Args:
+            page / page_size: 分页参数
+            gap_filter: all 全部 / pending 待处理 / handled 已处理
+        """
+        base = "FROM query_logs WHERE (answer_type = 1 OR feedback_status = 2)"
+        if gap_filter == "pending":
+            base += " AND gap_handled = 0"
+        elif gap_filter == "handled":
+            base += " AND gap_handled = 1"
+        with self._connect() as conn:
+            total = int(conn.execute(f"SELECT COUNT(*) {base}").fetchone()[0])
+            rows = conn.execute(
+                f"SELECT * {base} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+                (int(page_size), (int(page) - 1) * int(page_size)),
+            ).fetchall()
+        return {"total": total, "page": int(page), "page_size": int(page_size),
+                "items": [self._log_dict(row) for row in rows]}
+
+    def set_gap_handled(self, log_id: int, handled: bool) -> None:
+        """标记/撤销一条缺失记录的处理状态（补资料或已答复后由运营操作）。"""
+        if self.get_query_log(log_id) is None:
+            raise QueryLogNotFoundError(f"日志不存在:id={log_id}")
+        with self._connect() as conn:
+            conn.execute("UPDATE query_logs SET gap_handled = ? WHERE id = ?",
+                         (int(bool(handled)), int(log_id)))
+        logger.info(f"缺失记录处理状态更新,log:{log_id},handled:{handled}")
+
+    def gap_summary(self) -> dict:
+        """缺失概览计数：拒答数 / 无帮助数 / 待处理数（缺失 Tab 顶部徽章用）。"""
+        with self._connect() as conn:
+            refusal = int(conn.execute(
+                "SELECT COUNT(*) FROM query_logs WHERE answer_type = 1").fetchone()[0])
+            unhelpful = int(conn.execute(
+                "SELECT COUNT(*) FROM query_logs WHERE feedback_status = 2").fetchone()[0])
+            pending = int(conn.execute(
+                "SELECT COUNT(*) FROM query_logs WHERE gap_handled = 0 AND (answer_type = 1 OR feedback_status = 2)"
+            ).fetchone()[0])
+        return {"refusal_count": refusal, "unhelpful_count": unhelpful, "pending_count": pending}
+
 
 if __name__ == '__main__':
     # 离线自测：临时库验证三表 CRUD、授权去重与三种命中、默认组保护
@@ -360,6 +509,43 @@ if __name__ == '__main__':
         gw.resolve_user_group_ids(999)
         raise AssertionError("应抛人员不存在")
     except ValueError:
+        pass
+
+    # 查询日志 / 知识缺失闭环
+    lid_ok = gw.insert_query_log("t-log-1", u1["user_id"], "怎么保修", "烫金机怎么保修",
+                                 ["烫金机"], "正常答案", ANSWER_TYPE_NORMAL)
+    lid_refusal = gw.insert_query_log("t-log-2", None, "量子芯片参数", "量子芯片参数",
+                                      [], "未在知识库中检索到相关内容", ANSWER_TYPE_NO_KNOWLEDGE)
+
+    # 反馈规则：正常回答可反馈；拒答不可反馈；只能反馈本人的
+    gw.set_feedback(lid_ok, FEEDBACK_HELPFUL, u1["user_id"])
+    try:
+        gw.set_feedback(lid_refusal, FEEDBACK_UNHELPFUL, None)
+        raise AssertionError("拒答应不可反馈")
+    except FeedbackNotAllowedError:
+        pass
+    try:
+        gw.set_feedback(lid_ok, FEEDBACK_UNHELPFUL, 99999)
+        raise AssertionError("非本人应不可反馈")
+    except FeedbackForbiddenError:
+        pass
+
+    # 缺失视图：拒答先计入；无帮助更新后也计入；处理状态流转
+    assert [g["id"] for g in gw.list_gaps(1, 20, "all")["items"]] == [lid_refusal]
+    gw.set_feedback(lid_ok, FEEDBACK_UNHELPFUL, u1["user_id"])
+    assert {g["id"] for g in gw.list_gaps(1, 20, "all")["items"]} == {lid_ok, lid_refusal}
+    assert gw.list_gaps(1, 20, "pending")["total"] == 2
+    gw.set_gap_handled(lid_refusal, True)
+    assert gw.list_gaps(1, 20, "pending")["total"] == 1
+    assert gw.list_gaps(1, 20, "handled")["total"] == 1
+    summary = gw.gap_summary()
+    assert summary == {"refusal_count": 1, "unhelpful_count": 1, "pending_count": 1}, summary
+
+    # 不存在的日志 → 404 语义
+    try:
+        gw.set_gap_handled(99999, True)
+        raise AssertionError("应抛日志不存在")
+    except QueryLogNotFoundError:
         pass
 
     print("SQLITE_GATEWAY_SELFTEST_ALL_PASSED")

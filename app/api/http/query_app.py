@@ -13,14 +13,35 @@ SSE 机制与导入服务一致：
 import threading
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from app.shared.utils.path_util import PROJECT_ROOT
 
-from app.api.schemas.query_schemas import QueryRequest, QueryResponse
+from app.api.schemas.query_schemas import (
+    FeedbackRequest,
+    GapHandleRequest,
+    GapListResponse,
+    GapSummaryResponse,
+    QueryRequest,
+    QueryResponse,
+)
 from app.process.query.agent.main_graph import query_app
 from app.process.query.agent.state import create_default_state
+from app.infra.persistence.sqlite_gateway import (
+    FeedbackForbiddenError,
+    FeedbackNotAllowedError,
+    QueryLogNotFoundError,
+    sqlite_gateway,
+)
+from app.rag.query.query_log_service import (
+    gap_summary,
+    list_gaps,
+    mark_gap_handled,
+    record_query_log,
+    resolve_answer_type,
+    submit_feedback,
+)
 from app.infra.persistence.sqlite_gateway import sqlite_gateway
 from app.shared.config.settings_config import settings
 from app.shared.runtime.logger import logger
@@ -57,12 +78,13 @@ def _resolve_allowed_groups(user_id: int | None) -> list[int]:
     return [sqlite_gateway.get_default_group_id()]
 
 
-def _run_query_task(task_id: str, query: str, history: list[dict], allowed_group_ids: list[int]) -> None:
+def _run_query_task(task_id: str, query: str, history: list[dict], allowed_group_ids: list[int],
+                    user_id: int | None = None) -> None:
     """后台线程：流式跑查询图，逐节点推进度，结束推 FINAL（带答案）/ERROR，最后推 CLOSE。"""
     try:
-        # 1.初始化查询状态并标记任务处理中（allowed_group_ids 供检索时做知识组权限过滤）
+        # 1.初始化查询状态并标记任务处理中（allowed_group_ids 供检索过滤，user_id 供日志归属）
         state = create_default_state(task_id=task_id, query=query, history=history,
-                                     allowed_group_ids=allowed_group_ids)
+                                     allowed_group_ids=allowed_group_ids, user_id=user_id)
         update_task_status(task_id, TASK_STATUS_PROCESSING)
 
         # 2.逐节点流式执行：每个节点更新后推送一次进度快照
@@ -73,8 +95,9 @@ def _run_query_task(task_id: str, query: str, history: list[dict], allowed_group
                     final_state.update(node_state)
             task_push_queue(task_id)
 
-        # 3.查询成功：存答案 + 状态置完成 + 推 FINAL 事件（SSE订阅方拿到最终答案）
+        # 3.查询成功：落查询日志（拒答即缺失记录）+ 存答案 + 状态置完成 + 推 FINAL（含日志id供反馈）
         answer = str(final_state.get("answer") or "")
+        log_id = record_query_log(final_state)
         set_task_result(task_id, "answer", answer)
         update_task_status(task_id, TASK_STATUS_COMPLETED, push_queue=True)
         push_to_session(task_id, SSEEvent.FINAL, {
@@ -82,8 +105,10 @@ def _run_query_task(task_id: str, query: str, history: list[dict], allowed_group
             "answer": answer,
             "item_names": list(final_state.get("item_names") or []),
             "rewritten_query": str(final_state.get("rewritten_query") or ""),
+            "log_id": log_id,
+            "answer_type": resolve_answer_type(answer),
         })
-        logger.info(f"查询任务完成:{task_id},答案长度:{len(answer)}")
+        logger.info(f"查询任务完成:{task_id},答案长度:{len(answer)},log:{log_id}")
     except Exception as e:
         # 4.查询失败：状态置失败，推 ERROR 事件（不中断其他任务）
         logger.error(f"查询任务失败:{task_id}:{str(e)}", exc_info=True)
@@ -101,14 +126,19 @@ def query(request: QueryRequest) -> QueryResponse:
     task_id = uuid4().hex
     history = [item.model_dump() for item in request.history]
     state = create_default_state(task_id=task_id, query=request.query, history=history,
-                                 allowed_group_ids=_resolve_allowed_groups(request.user_id))
+                                 allowed_group_ids=_resolve_allowed_groups(request.user_id),
+                                 user_id=request.user_id)
     final_state = query_app.invoke(state)
     answer = str(final_state.get("answer") or "")
+    # 问答结束落查询日志（拒答即知识缺失记录），日志 id 随响应下发供前端反馈
+    log_id = record_query_log(final_state)
     logger.info(f"同步问答完成:{task_id},答案长度:{len(answer)}")
     return QueryResponse(
         answer=answer,
         item_names=list(final_state.get("item_names") or []),
         rewritten_query=str(final_state.get("rewritten_query") or ""),
+        log_id=log_id,
+        answer_type=resolve_answer_type(answer),
     )
 
 @app.post("/query/sse")
@@ -123,10 +153,59 @@ def query_sse(request: QueryRequest, http_request: Request) -> StreamingResponse
     # 2.后台线程执行查询图，接口立即返回 SSE 流
     threading.Thread(
         target=_run_query_task,
-        args=(task_id, request.query, history, _resolve_allowed_groups(request.user_id)),
+        args=(task_id, request.query, history, _resolve_allowed_groups(request.user_id), request.user_id),
         daemon=True,
     ).start()
     return StreamingResponse(sse_generator(task_id, http_request), media_type="text/event-stream")
+
+
+# ---------------- 查询日志 / 知识缺失（借鉴讲义模块十的运营闭环） ----------------
+
+def _map_log_error(e: Exception) -> HTTPException:
+    """日志业务异常 → HTTP 语义：不存在 404 / 非本人 403 / 规则与入参 400。"""
+    if isinstance(e, QueryLogNotFoundError):
+        return HTTPException(status_code=404, detail=str(e))
+    if isinstance(e, FeedbackForbiddenError):
+        return HTTPException(status_code=403, detail=str(e))
+    return HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/query/feedback/{log_id}")
+def query_feedback(log_id: int, request: FeedbackRequest) -> dict:
+    """提交问答帮助度反馈（仅正常回答可反馈、仅本人日志可反馈）。"""
+    try:
+        submit_feedback(log_id, request.feedback_status, request.user_id)
+    except (QueryLogNotFoundError, FeedbackNotAllowedError, FeedbackForbiddenError, ValueError) as e:
+        raise _map_log_error(e) from e
+    return {"ok": True, "log_id": log_id, "feedback_status": request.feedback_status}
+
+
+@app.get("/query/gaps", response_model=GapListResponse)
+def query_gaps(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    filter: str = Query("all"),
+) -> GapListResponse:
+    """知识缺失运营视图：资料缺失拒答 ∪ 无帮助反馈的查询日志（可按处理状态筛选）。"""
+    if filter not in ("all", "pending", "handled"):
+        raise HTTPException(status_code=400, detail=f"filter不合法:{filter},仅支持 all/pending/handled")
+    return GapListResponse(**list_gaps(page, page_size, filter))
+
+
+@app.patch("/query/gaps/{log_id}/handled")
+def query_gap_handle(log_id: int, request: GapHandleRequest) -> dict:
+    """标记/撤销一条缺失记录的处理状态（补资料或已答复后由运营操作）。"""
+    try:
+        mark_gap_handled(log_id, request.handled)
+    except (QueryLogNotFoundError, ValueError) as e:
+        raise _map_log_error(e) from e
+    return {"ok": True, "log_id": log_id, "handled": request.handled}
+
+
+@app.get("/query/gaps/summary", response_model=GapSummaryResponse)
+def query_gap_summary() -> GapSummaryResponse:
+    """缺失概览计数：拒答数 / 无帮助数 / 待处理数。"""
+    return GapSummaryResponse(**gap_summary())
 
 
 # 前端控制台（单页应用，两服务共用同一页面，/docs 仍可用作接口调试）

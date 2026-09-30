@@ -16,6 +16,7 @@ class QueryGraphState(TypedDict):
     item_names: list[str]
     rewritten_query: str
     allowed_group_ids: list[int]
+    user_id: int | None
 
     search_context: list[dict]
     hyde_answer: str
@@ -33,6 +34,7 @@ query_default_state: QueryGraphState = {
     "item_names": [],
     "rewritten_query": "",
     "allowed_group_ids": [],
+    "user_id": None,
     "search_context": [],
     "hyde_answer": "",
     "hyde_context": [],

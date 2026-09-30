@@ -300,6 +300,7 @@
     <button class="tab" data-tab="import">📤 文档导入</button>
     <button class="tab" data-tab="chunks">🧩 切片管理</button>
     <button class="tab" data-tab="perm">👥 权限与分组</button>
+    <button class="tab" data-tab="gaps">📉 知识缺失</button>
   </nav>
 
   <!-- ============ 问答面板 ============ -->
@@ -418,6 +419,25 @@
         </div>
         <div id="preview-result" class="perm-list"></div>
       </div>
+    </div>
+  </section>
+
+  <!-- ============ 知识缺失面板 ============ -->
+  <section id="panel-gaps" class="panel">
+    <div class="chunk-toolbar">
+      <span class="meta-chip" id="gap-summary">加载中…</span>
+      <select id="gap-filter" class="chunk-select" style="flex:0 0 140px">
+        <option value="all">全部缺失</option>
+        <option value="pending">待处理</option>
+        <option value="handled">已处理</option>
+      </select>
+      <button class="ghost-btn" id="gap-refresh">🔄 刷新</button>
+    </div>
+    <div id="gap-list"></div>
+    <div class="chunk-pager">
+      <button class="ghost-btn" id="gap-prev">上一页</button>
+      <span id="gap-page-info" class="h-meta"></span>
+      <button class="ghost-btn" id="gap-next">下一页</button>
     </div>
   </section>
 </div>
@@ -615,7 +635,10 @@ function renderStreamingText(holder, text) {
 
 function renderAnswer(holder, data) {
   holder.answered = true;
-  const actions = `<span class="ans-actions"><button class="mini-btn" data-copy>复制答案</button></span>`;
+  /* 反馈按钮只在"正常回答且有日志"时出现（拒答直接进知识缺失，不需要用户点无帮助） */
+  const fbButtons = (data.answer_type === 0 && data.log_id != null)
+    ? `<button class="mini-btn" data-fb="1">👍 有帮助</button><button class="mini-btn" data-fb="2">👎 无帮助</button>` : '';
+  const actions = `<span class="ans-actions"><button class="mini-btn" data-copy>复制答案</button>${fbButtons}</span>`;
   let meta = '';
   const items = data.item_names || [];
   if (items.length) {
@@ -632,6 +655,18 @@ function renderAnswer(holder, data) {
       .then(() => toast('已复制', 'success'))
       .catch(() => toast('复制失败', 'error'));
   });
+  holder.querySelectorAll('[data-fb]').forEach((b) => b.addEventListener('click', async () => {
+    try {
+      const resp = await fetch(`${S.queryBase}/query/feedback/${data.log_id}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ feedback_status: Number(b.dataset.fb), user_id: currentUserId() }),
+      });
+      const d2 = await resp.json();
+      if (!resp.ok) throw new Error(d2.detail || `HTTP ${resp.status}`);
+      toast('感谢反馈!帮助度已记录', 'success');
+      holder.querySelectorAll('[data-fb]').forEach((x) => { x.disabled = true; });
+    } catch (err) { toast('反馈失败:' + err.message, 'error'); }
+  }));
   $('chat-scroll').scrollTop = $('chat-scroll').scrollHeight;
 }
 
@@ -1319,6 +1354,78 @@ $('preview-btn').addEventListener('click', async () => {
 document.querySelector('.tab[data-tab="perm"]').addEventListener('click', () => {
   renderGroups(); renderUsers(); renderGrants();
 });
+
+/* ================= 知识缺失（借鉴讲义模块十的运营闭环） ================= */
+const gapState = { page: 1, pageSize: 20, total: 0, filter: 'all' };
+
+async function loadGapSummary() {
+  try {
+    const resp = await fetch(`${S.queryBase}/query/gaps/summary`);
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    $('gap-summary').textContent = `🚫 拒答 ${data.refusal_count} · 👎 无帮助 ${data.unhelpful_count} · ⏳ 待处理 ${data.pending_count}`;
+  } catch (e) { $('gap-summary').textContent = '概览加载失败'; }
+}
+
+async function loadGaps() {
+  $('gap-list').innerHTML = '<div class="empty-hint">加载中…</div>';
+  try {
+    const qs = `page=${gapState.page}&page_size=${gapState.pageSize}&filter=${gapState.filter}`;
+    const resp = await fetch(`${S.queryBase}/query/gaps?${qs}`);
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    gapState.total = data.total;
+    const pages = Math.max(1, Math.ceil(data.total / gapState.pageSize));
+    $('gap-page-info').textContent = `第 ${gapState.page} / ${pages} 页`;
+    $('gap-prev').disabled = gapState.page <= 1;
+    $('gap-next').disabled = gapState.page >= pages;
+    $('gap-list').innerHTML = (data.items || []).map((it) => {
+      const kind = it.answer_type === 1
+        ? '<span class="meta-chip">🚫 资料缺失拒答</span>'
+        : '<span class="meta-chip">👎 无帮助反馈</span>';
+      const handled = it.gap_handled ? '<span class="meta-chip">✅ 已处理</span>' : '';
+      const answer = String(it.answer || '');
+      return `<div class="import-card chunk-card" data-id="${it.id}">
+        <div class="import-head">
+          ${kind}${handled}
+          <span class="meta-chip">${escapeHtml(it.created_at || '')}</span>
+          <span class="chunk-actions">
+            <button class="mini-btn" data-act="${it.gap_handled ? 'unhandle' : 'handle'}">${it.gap_handled ? '撤销处理' : '标记已处理'}</button>
+          </span>
+        </div>
+        <div class="chunk-text"><b>问：</b>${escapeHtml(it.query)}${it.rewritten_query && it.rewritten_query !== it.query ? `<br><b>改写：</b>${escapeHtml(it.rewritten_query)}` : ''}</div>
+        <div class="chunk-text" style="color:var(--text-dim)"><b>答：</b>${escapeHtml(answer.slice(0, 200))}${answer.length > 200 ? '…' : ''}</div>
+      </div>`;
+    }).join('') || '<div class="empty-hint">暂无知识缺失记录——用户拒答与"无帮助"反馈会出现在这里</div>';
+  } catch (e) {
+    $('gap-list').innerHTML = `<div class="empty-hint">加载失败:${escapeHtml(e.message)}</div>`;
+  }
+}
+
+$('gap-list').addEventListener('click', async (e) => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  const id = btn.closest('.chunk-card')?.dataset.id;
+  if (!id) return;
+  const handled = btn.dataset.act === 'handle';
+  try {
+    const resp = await fetch(`${S.queryBase}/query/gaps/${id}/handled`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ handled }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    toast(handled ? '已标记为处理完成' : '已撤销处理标记', 'success');
+    loadGaps(); loadGapSummary();
+  } catch (err) { toast('操作失败:' + err.message, 'error'); }
+});
+$('gap-filter').addEventListener('change', function () { gapState.filter = this.value; gapState.page = 1; loadGaps(); });
+$('gap-refresh').addEventListener('click', () => { loadGaps(); loadGapSummary(); });
+$('gap-prev').addEventListener('click', () => { if (gapState.page > 1) { gapState.page--; loadGaps(); } });
+$('gap-next').addEventListener('click', () => {
+  if (gapState.page < Math.max(1, Math.ceil(gapState.total / gapState.pageSize))) { gapState.page++; loadGaps(); }
+});
+
+document.querySelector('.tab[data-tab="gaps"]').addEventListener('click', () => { loadGaps(); loadGapSummary(); });
 
 /* ================= 测试按钮 / 初始化 ================= */
 $('test-import').addEventListener('click', async () => {
