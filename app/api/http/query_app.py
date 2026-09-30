@@ -15,7 +15,8 @@ from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
+from app.shared.utils.path_util import PROJECT_ROOT
 
 from app.api.schemas.query_schemas import QueryRequest, QueryResponse
 from app.process.query.agent.main_graph import query_app
@@ -64,7 +65,12 @@ def _run_query_task(task_id: str, query: str, history: list[dict]) -> None:
         answer = str(final_state.get("answer") or "")
         set_task_result(task_id, "answer", answer)
         update_task_status(task_id, TASK_STATUS_COMPLETED, push_queue=True)
-        push_to_session(task_id, SSEEvent.FINAL, {"task_id": task_id, "answer": answer})
+        push_to_session(task_id, SSEEvent.FINAL, {
+            "task_id": task_id,
+            "answer": answer,
+            "item_names": list(final_state.get("item_names") or []),
+            "rewritten_query": str(final_state.get("rewritten_query") or ""),
+        })
         logger.info(f"查询任务完成:{task_id},答案长度:{len(answer)}")
     except Exception as e:
         # 4.查询失败：状态置失败，推 ERROR 事件（不中断其他任务）
@@ -105,6 +111,18 @@ def query_sse(request: QueryRequest, http_request: Request) -> StreamingResponse
     # 2.后台线程执行查询图，接口立即返回 SSE 流
     threading.Thread(target=_run_query_task, args=(task_id, request.query, history), daemon=True).start()
     return StreamingResponse(sse_generator(task_id, http_request), media_type="text/event-stream")
+
+
+# 前端控制台（单页应用，两服务共用同一页面，/docs 仍可用作接口调试）
+HTML_PATH = PROJECT_ROOT / "app" / "api" / "static" / "index.html"
+
+
+@app.get("/", include_in_schema=False)
+def index() -> FileResponse:
+    """返回前端控制台页面。"""
+    if not HTML_PATH.exists():
+        raise HTTPException(status_code=404, detail="前端页面缺失:app/api/static/index.html")
+    return FileResponse(HTML_PATH, media_type="text/html")
 
 
 if __name__ == "__main__":

@@ -167,3 +167,6 @@ temp/
 output/
 logs/
 doc/
+
+# macOS 系统文件
+.DS_Store

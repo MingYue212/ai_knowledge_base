@@ -18,7 +18,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from app.api.schemas.import_schemas import ImportResponse, ProgressResponse
 from app.process.import_.agent.main_graph import import_app
@@ -124,6 +124,18 @@ def import_progress(task_id: str) -> ProgressResponse:
 def import_progress_stream(task_id: str, request: Request) -> StreamingResponse:
     """SSE 实时进度流：逐节点推送 progress 事件，结束推 final/error 后自动关闭。"""
     return StreamingResponse(sse_generator(task_id, request), media_type="text/event-stream")
+
+
+# 前端控制台（单页应用，两服务共用同一页面，/docs 仍可用作接口调试）
+HTML_PATH = PROJECT_ROOT / "app" / "api" / "static" / "index.html"
+
+
+@app.get("/", include_in_schema=False)
+def index() -> FileResponse:
+    """返回前端控制台页面。"""
+    if not HTML_PATH.exists():
+        raise HTTPException(status_code=404, detail="前端页面缺失:app/api/static/index.html")
+    return FileResponse(HTML_PATH, media_type="text/html")
 
 
 if __name__ == "__main__":
